@@ -1,0 +1,558 @@
+---
+title: "Final catalog of predicted ncORFs and overview"
+editor: source
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+## Data path
+
+### ORF prediction
+ORFs predicted in each library:
+- human: /nfs_data/changy/poj/ORF/human_riboseq/data_174/predict_output
+- mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/predict_output
+
+Number of ncORFs in each library:
+- human: /nfs_data/changy/poj/ORF/human_riboseq/data_174/human_method_num_library_beforefilter.tsv
+- mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_method_num_library_beforefilter.tsv
+
+Number of ncORFs in each library after filtering (Psite total >= 10, FLOSS < cutoff, RRS > 1):
+- human: /nfs_data/changy/poj/ORF/human_riboseq/data_174/human_method_num_library_afterfilter.tsv
+- mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_method_num_library_afterfilter.tsv
+
+Final list of ORFs:
+- human (/nfs_data/changy/poj/ORF/human_riboseq/data_174/):
+    - human_three_methods_ncorf.tsv
+    - human_three_methods_ncorf.bed
+    - human_three_methods_ncorf.nuc.fa
+    - human_three_methods_ncorf.pep.fa
+- mouse (/nfs_data/changy/poj/ORF/mouse_riboseq/data_209/):
+    - mouse_three_methods_ncorf.tsv
+    - mouse_three_methods_ncorf.bed
+    - mouse_three_methods_ncorf.nuc.fa
+    - mouse_three_methods_ncorf.pep.fa
+
+
+## human and mouse number of libraries
+```{r}
+library(data.table)
+library(ggplot2)
+library(cols4all)
+library(patchwork)
+
+theme_set(theme_classic(base_size = 12) + theme(
+    axis.text = element_text(color = 'black'),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)))
+
+orflevels <- c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF')
+tofct_orflevels <- function(x, reverse = FALSE){
+    x[x == 'lncRNA-ORF'] <- 'lncORF'
+    if(reverse){
+        factor(x, levels = rev(orflevels))
+    }else{
+        factor(x, levels = orflevels)
+    }
+}
+
+human_lib <- read_tsv("data/library/human_data_refilter_174.tsv")
+p1 <- ggplot(human_lib, aes(x = fct_rev(fct_infreq(re_tissue)))) +
+  geom_histogram(stat = "count", fill = "#d15034") +
+  theme_classic() +
+  theme(axis.text.x = element_text(color = "black"),
+        axis.text.y = element_text(color = "black")) +
+  xlab("Tissue") +
+  ylab("Library counts") +
+  guides(fill = "none") +
+  coord_flip() +
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_blank(),
+        axis.text = element_text(color = "black"),
+        strip.text = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  scale_y_continuous(position = "right") +
+  xlab(NULL) 
+
+mouse_lib <- read_tsv("data/library/mouse_data_refilter_209.tsv")
+p2 <- ggplot(mouse_lib, aes(x = fct_rev(fct_infreq(re_tissue)))) +
+  geom_histogram(stat = "count",fill = "#264a5f") +
+  theme_classic() +
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_blank(),
+        axis.text = element_text(color = "black"),
+        strip.text = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  xlab("Tissue") +
+  ylab("Library counts") +
+  guides(fill = "none") +
+  coord_flip() +
+  theme(strip.background = element_blank(), strip.text.x = element_blank()) +
+  scale_y_continuous(position = "right") +
+  xlab(NULL)
+p1+p2 + plot_annotation(tag_levels = "A")
+ggsave("figures/ncorfs/human_and_mouse_library_counts_refilter.pdf", width = 9, height = 5)
+```
+
+
+## Final Set of ncORFs
+```{r}
+read_ncorf_meta <- function(path){
+    ncorf <- fread(path)
+    ncorf[, .(
+        uid, orf_type, orf_len, start_codon, gene_id, gene_name,
+        tx_name, tstart, tend, chrom, strand, gene_biotype, transcript_biotype,
+        tx_len, cds_len, utr5_len, utr3_len, uid_start, uid_end)]
+}
+ncorf_human <- read_ncorf_meta('data/ncorf_annot/human_three_methods_ncorf.tsv')
+ncorf_mouse <- read_ncorf_meta('data/ncorf_annot/mouse_three_methods_ncorf.tsv')
+
+# Note:
+# we need to exclude transcript isoforms that are of type "protein_coding_CDS_not_defined" in the latest gene annotation.
+txinfo_latest_human <- fread('data/Homo_sapiens.GRCh38.111.gtf.txinfo.tsv')
+ncorf_human[txinfo_latest_human, new_txbiotype := i.transcript_biotype, on = .(tx_name)]
+txinfo_latest_mouse <- fread('data/Mus_musculus.GRCm39.111.gtf.txinfo.tsv')
+ncorf_mouse[txinfo_latest_mouse, new_txbiotype := i.transcript_biotype, on = .(tx_name)]
+
+# processed_transcript
+# two lncRNA (processed_transcript) becomes protein_coding in human
+ncorf_human[transcript_biotype != 'protein_coding' & new_txbiotype == 'protein_coding']
+txinfo_latest_human[tx_name == 'ENST00000489277']  # case 1: lncORF becomes uORF
+txinfo_latest_human[tx_name == 'ENST00000640298']  # case 2: lncORF becomres CDS, should be excluded
+final_ncorf_human <- ncorf_human[uid != 'X_119991051_119991680_+']
+
+# five lncRNA becomres protein_coding in mouse, except for 4_14936442_14938514_+, all seems becomes CDS,
+# of which one might be incorrect: ENSMUST00000124965
+ncorf_mouse[transcript_biotype != 'protein_coding' & new_txbiotype == 'protein_coding']
+txinfo_latest_mouse[tx_name %in% ncorf_mouse[transcript_biotype != 'protein_coding' & new_txbiotype == 'protein_coding']$tx_name]
+tmp <- ncorf_mouse[transcript_biotype != 'protein_coding' & new_txbiotype == 'protein_coding' & uid != '4_14936442_14938514_+']
+final_ncorf_mouse <- ncorf_mouse[!uid %in% tmp$uid]
+
+# in latest release, all processed_transcript are resolved to other biological biotypes
+# (mainly lncRNA and protein_coding_CDS_not_defined)
+final_ncorf_human[transcript_biotype != 'protein_coding' & new_txbiotype == 'protein_coding_CDS_not_defined']
+final_ncorf_mouse[transcript_biotype != 'protein_coding' & new_txbiotype == 'protein_coding_CDS_not_defined']
+# to be conservative on prediction of lncRNA ORFs, we exclude those that are no-longer lncRNA
+final_ncorf_human <- final_ncorf_human[!(transcript_biotype == 'processed_transcript' & new_txbiotype != 'lncRNA')]
+final_ncorf_mouse <- final_ncorf_mouse[!(transcript_biotype == 'processed_transcript' & new_txbiotype != 'lncRNA')]
+
+# cleanup
+final_ncorf_human[, new_txbiotype := NULL]
+final_ncorf_mouse[, new_txbiotype := NULL]
+final_ncorf_human[orf_type == 'lncRNA-ORF', orf_type := 'lncORF']
+final_ncorf_mouse[orf_type == 'lncRNA-ORF', orf_type := 'lncORF']
+
+fwrite(final_ncorf_human, 'data/ncorf_annot/human_three_methods_ncorf.final.tsv')  # 12469
+fwrite(final_ncorf_mouse, 'data/ncorf_annot/mouse_three_methods_ncorf.final.tsv')  # 16960
+```
+
+### Generate final annotation files
+```{r}
+# bed
+bed_human <- fread('data/ncorf_annot/human_three_methods_ncorf.bed')
+bed_mouse <- fread('data/ncorf_annot/mouse_three_methods_ncorf.bed')
+bed_human <- bed_human[V4 %in% final_ncorf_human$uid]
+bed_mouse <- bed_mouse[V4 %in% final_ncorf_mouse$uid]
+fwrite(bed_human, 'data/ncorf_annot/human_three_methods_ncorf.final.bed', sep = '\t', col.names = FALSE)
+fwrite(bed_mouse, 'data/ncorf_annot/mouse_three_methods_ncorf.final.bed', sep = '\t', col.names = FALSE)
+
+# seq
+tmp_nuc_human <- Biostrings::readDNAStringSet('data/ncorf_annot/human_three_methods_ncorf.nuc.fa')
+tmp_nuc_human <- tmp_nuc_human[names(tmp_nuc_human) %in% ncorfs_human$uid]
+Biostrings::writeXStringSet(tmp_nuc_human, 'data/ncorf_annot/human_three_methods_ncorf.final.nuc.fa')
+
+tmp_pep_human <- Biostrings::readAAStringSet('data/ncorf_annot/human_three_methods_ncorf.pep.fa')
+tmp_pep_human <- tmp_pep_human[names(tmp_pep_human) %in% ncorfs_human$uid]
+Biostrings::writeXStringSet(tmp_pep_human, 'data/ncorf_annot/human_three_methods_ncorf.final.pep.fa')
+
+tmp_nuc_mouse <- Biostrings::readDNAStringSet('data/ncorf_annot/mouse_three_methods_ncorf.nuc.fa')
+tmp_nuc_mouse <- tmp_nuc_mouse[names(tmp_nuc_mouse) %in% ncorfs_mouse$uid]
+Biostrings::writeXStringSet(tmp_nuc_mouse, 'data/ncorf_annot/mouse_three_methods_ncorf.final.nuc.fa')
+
+tmp_pep_mouse <- Biostrings::readAAStringSet('data/ncorf_annot/mouse_three_methods_ncorf.pep.fa')
+tmp_pep_mouse <- tmp_pep_mouse[names(tmp_pep_mouse) %in% ncorfs_mouse$uid]
+Biostrings::writeXStringSet(tmp_pep_mouse, 'data/ncorf_annot/mouse_three_methods_ncorf.final.pep.fa')
+```
+
+
+```{bash}
+sed 's/^/chr/' human_three_methods_ncorf.final.bed > human_three_methods_ncorf.final.chr.bed
+sed 's/^/chr/' mouse_three_methods_ncorf.final.bed > mouse_three_methods_ncorf.final.chr.bed
+```
+
+
+### Overview of final ORFs
+```{r}
+ncorf_human <- fread('data/ncorf_annot/human_three_methods_ncorf.final.tsv')
+ncorf_mouse <- fread('data/ncorf_annot/mouse_three_methods_ncorf.final.tsv')
+
+tmp1 <- ncorf_human[, .(.N), by = .(orf_type)]
+tmp2 <- ncorf_mouse[, .(.N), by = .(orf_type)]
+plt <- rbind(Human = tmp1, Mouse = tmp2, idcol = 'species')
+plt[, orf_type := factor(orf_type, levels=c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF'))]
+
+# number of ORF types
+ggplot(plt, aes(x = orf_type, y = N, fill = orf_type)) +
+    geom_col(show.legend = FALSE, width = 0.75) +
+    geom_text(aes(label = N), vjust = -0.2) +
+    scale_fill_brewer(palette = 'Dark2') +
+    facet_wrap(vars(species), scales = 'free') +
+    labs(x = NULL, y = 'Number of ORFs') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1))
+ggsave('figures/ncorf_overview_type_count.pdf', width = 6, height = 3)
+
+# length distribution
+plt <- rbind(Human = ncorf_human, Mouse = ncorf_mouse, idcol = 'species')
+plt[, orf_type := factor(orf_type, levels=c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF'))]
+
+ggplot(plt, aes(x = orf_len/3 - 1, color = orf_type)) +
+    stat_ecdf() +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_color_brewer(palette = 'Dark2') +
+    scale_x_log10() +
+    labs(x = 'ORF length (amino acids)', y = 'Cumulative fractions', color = NULL)
+ggsave('figures/ncorf_length_by_type_ecdf.pdf', width = 7, height = 3)
+
+
+plt[, {
+    p <- sapply(orflevels, function(ot1){
+        sapply(orflevels, function(ot2){
+            wilcox.test(orf_len[orf_type == ot1], orf_len[orf_type == ot2])$p.value
+        })
+    })
+    p <- as.data.table(p)
+    setnames(p, orflevels)
+    p[, orf_type := orflevels]
+    p[]
+}, by = .(species)]
+
+# start codon usage
+ggplot(plt, aes(y = orf_type, fill = start_codon)) +
+    geom_bar(position = 'fill') +
+    facet_wrap(vars(species)) +
+    scale_fill_discrete_c4a_cat('carto.safe') +
+    labs(y = NULL, x = 'Fraction', fill = NULL)
+ggsave('figures/ncorf_start_codon_usage.pdf', width = 6, height = 3)
+
+# relative position in the coding sequence
+ggplot(plt, aes(x = tstart/tx_len)) +
+    geom_histogram(binwidth = 0.04) +
+    facet_grid(rows = vars(orf_type), cols = vars(species), scales = 'free')
+
+ggplot(plt, aes(x = tstart/tx_len, y = after_stat(density), color = orf_type)) +
+    geom_freqpoly(binwidth = 0.04) +
+    scale_color_brewer(palette = 'Dark2') +
+    facet_wrap(vars(species), scales = 'free_y') +
+    labs(x = 'ncORF start position / transcript length', y = 'Density', color = NULL)
+ggsave('figures/ncorf_start_relative_position.pdf', width = 7, height = 3)
+```
+
+### MS validation
+```{r}
+library(tidyverse)
+library(ggplot2)
+human_ncorf <- read_csv("data/new_output/human_three_methods_ncorf.final.tsv") ## human:12469
+mouse_ncorf <- read_csv("data/new_output/mouse_three_methods_ncorf.final.tsv") ## mouse:16960
+
+## cluster 
+hsa_twomed_cluster <- read_tsv("data/predict_output/human_three_method_two_lib_met_cluster.tsv") 
+human_cluster_uid <- hsa_twomed_cluster %>%
+  filter(uid %in% human_ncorf$uid)
+human_cluster <- hsa_twomed_cluster %>% 
+  filter(cluster %in% human_cluster_uid$cluster) %>%
+  filter(start_codon == 'ATG')
+
+human_ncorf <- read_csv("data/new_output/human_three_methods_ncorf.final.tsv") %>%
+  left_join(hsa_twomed_cluster[,c(1,4)], by = "uid")
+hsa_ms <- read_tsv("data/predict_output/human_MS_final.tsv")
+ms_hsa <- human_cluster %>%
+  filter(uid_start %in% hsa_ms$uid_start | uid_end %in% hsa_ms$uid_end) %>%
+  distinct(cluster) %>%
+  left_join(human_ncorf, by = "cluster") ## 1586
+ms_hsa$orf_type <- factor(ms_hsa$orf_type,levels = c("lncORF", "uORF", "uoORF", "iORF", "doORF", "dORF"))
+
+p1 <- ggplot(ms_hsa, aes(x = orf_type)) +
+  geom_bar(stat="count",aes(fill=orf_type)) +
+  theme_classic(base_size = 12) +
+  labs(y = "Number of ORFs", x = NULL,title = "Human") +
+  theme(axis.ticks = element_blank(),
+        strip.background = element_blank(),
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_text(color = "black", angle = 30, vjust = 1, hjust = 1),
+        strip.text = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  guides(fill = "none") +
+  scale_fill_brewer(palette = "Dark2") +
+  geom_text(stat="count",aes(label = after_stat(count)), vjust = -0.5) 
+ggsave("figures/paper_figures/human_MS_verification.pdf", width = 4, height = 4)
+## Mouse MS
+mmu_twomed_cluster <- read_tsv("data/predict_output/mouse_three_method_two_lib_met_cluster.tsv")
+mouse_ncorf <- read_csv("data/new_output/mouse_three_methods_ncorf.final.tsv") %>%
+  left_join(mmu_twomed_cluster[,c(1,4)], by = "uid")
+mmu_ms <- read_tsv("data/predict_output/mouse_MS_final.tsv")
+
+mouse_cluster_uid <- mmu_twomed_cluster %>%
+  filter(uid %in% mouse_ncorf$uid)
+mouse_cluster <- mmu_twomed_cluster %>% 
+  filter(cluster %in% mouse_cluster_uid$cluster) 
+
+ms_mmu <- mouse_cluster %>%
+  filter(uid_start %in% mmu_ms$uid_start | uid_end %in% mmu_ms$uid_end) %>%
+  distinct(cluster) %>%
+  left_join(mouse_ncorf, by = "cluster") ## 615
+ms_mmu$orf_type <- factor(ms_mmu$orf_type,levels = c("lncORF", "uORF", "uoORF", "iORF", "doORF", "dORF"))
+
+p2 <- ggplot(ms_mmu, aes(x = orf_type)) +
+  geom_bar(stat="count",aes(fill=orf_type)) +
+  theme_classic(base_size = 12) +
+  labs(y = "Number of ORFs", x = NULL,title = "Mouse") +
+  theme(axis.ticks = element_blank(),
+        strip.background = element_blank(),
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_text(color = "black", angle = 30, vjust = 1, hjust = 1),
+        strip.text = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  guides(fill = "none") +
+  scale_fill_brewer(palette = "Dark2") +
+  geom_text(stat="count",aes(label = after_stat(count)), vjust = -0.5) 
+p1+p2
+ggsave("figures/paper_figures/human_mouse_MS_verification.pdf", width = 10, height = 5)
+```
+
+### Seq logo
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(ggseqlogo)
+
+# mouse
+mouse_ncorfs <- read_tsv("data/predict_output/mouse_three_methods_ncorf.tsv")
+mmu_ncorfs <- read_csv("data/new_output/mouse_three_methods_ncorf.final.tsv") %>%
+  inner_join(mouse_ncorfs[,c(54,56)], by = "uid")
+
+mmu_uorf <- mmu_ncorfs %>%
+  filter(orf_type == 'uORF') %>%
+  select(orf_type, kozak_seq)
+mmu_uoorf <- mmu_ncorfs %>%
+  filter(orf_type == 'uoORF') %>%
+  select(orf_type, kozak_seq)
+mmu_dorf <- mmu_ncorfs %>%
+  filter(orf_type == 'dORF') %>%
+  select(orf_type, kozak_seq)  
+mmu_doorf <- mmu_ncorfs %>%
+  filter(orf_type == 'doORF') %>%
+  select(orf_type, kozak_seq)
+mmu_lncorf <- mmu_ncorfs %>%
+  filter(orf_type == 'lncORF') %>%
+  select(orf_type, kozak_seq)
+mmu_iorf <- mmu_ncorfs %>%
+  filter(orf_type == 'iORF') %>%
+  select(orf_type, kozak_seq)    
+
+p1 = ggseqlogo(mmu_uorf$kozak_seq, method = 'prob') + xlab("uORF") 
+p2 = ggseqlogo(mmu_uoorf$kozak_seq, method = 'prob') + xlab("uoORF")
+p3 = ggseqlogo(mmu_dorf$kozak_seq, method = 'prob')+ xlab("dORF")
+p4 = ggseqlogo(mmu_doorf$kozak_seq, method = 'prob')+ xlab("doORF")
+p5 = ggseqlogo(mmu_lncorf$kozak_seq, method = 'prob')+ xlab("lncORF")
+p6 = ggseqlogo(mmu_iorf$kozak_seq, method = 'prob')+ xlab("iORF")
+p1+p2+p3+p4+p5+p6
+ggsave("figures/paper_figures/mouse_kozak_seqlogo_orftype.pdf", width = 6, height = 3)
+
+# human
+human_ncorfs <- read_tsv("data/predict_output/human_three_methods_ncorf.tsv") 
+hsa_ncorfs <- read_csv("data/new_output/human_three_methods_ncorf.final.tsv") %>%
+  inner_join(human_ncorfs[,c(54,56)], by = "uid")
+hsa_uorf <- hsa_ncorfs %>%
+  filter(orf_type == 'uORF') %>%
+  select(orf_type, kozak_seq)
+hsa_uoorf <- hsa_ncorfs %>%
+  filter(orf_type == 'uoORF') %>%
+  select(orf_type, kozak_seq)
+hsa_dorf <- hsa_ncorfs %>%
+  filter(orf_type == 'dORF') %>%
+  select(orf_type, kozak_seq)  
+hsa_doorf <- hsa_ncorfs %>%
+  filter(orf_type == 'doORF') %>%
+  select(orf_type, kozak_seq)
+hsa_lncorf <- hsa_ncorfs %>%
+  filter(orf_type == 'lncORF') %>%
+  select(orf_type, kozak_seq)
+hsa_intorf <- hsa_ncorfs %>%
+  filter(orf_type == 'iORF') %>%
+  select(orf_type, kozak_seq)
+
+p1 = ggseqlogo(hsa_uorf$kozak_seq, method = 'prob')+ xlab("uORF")
+p2 = ggseqlogo(hsa_uoorf$kozak_seq, method = 'prob')+ xlab("uoORF")
+p3 = ggseqlogo(hsa_dorf$kozak_seq, method = 'prob')+ xlab("dORF")
+p4 = ggseqlogo(hsa_doorf$kozak_seq, method = 'prob')+ xlab("doORF")
+p5 = ggseqlogo(hsa_lncorf$kozak_seq, method = 'prob')+ xlab("lncORF")
+p6 = ggseqlogo(hsa_intorf$kozak_seq, method = 'prob')+ xlab("iORF")
+p1+p2+p3+p4+p5+p6
+ggsave("figures/paper_figures/human_kozak_seqlogo_orftype.pdf", width = 6, height = 3)
+```
+
+### Compare AA/codon frequency
+```{r}
+# AA
+phychem_files <- c(
+    'Human_ncORF' = 'data/ncorf_annot/human_three_methods_ncorf.physiocochemical.tsv',
+    'Mouse_ncORF' = 'data/ncorf_annot/mouse_three_methods_ncorf.physiocochemical.tsv',
+    'Human_CDS'   = 'data/ncorf_annot/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.physiocochemical.tsv',
+    'Mouse_CDS'   = 'data/ncorf_annot/Mus_musculus.GRCm39.107.txinfo.rep.pcg.physiocochemical.tsv'
+)
+
+get_aafreq <- function(path){
+    dat <- fread(path)
+    seqs <- Biostrings::AAStringSet(setNames(dat[[2]], dat[[1]]))
+    colSums(Biostrings::alphabetFrequency(seqs)[, 1:20])
+}
+
+ncorf_aafreq <- sapply(phychem_files, get_aafreq)
+ncorf_aafreq <- as.data.table(ncorf_aafreq, keep.rownames = 'AA')
+ncorf_aafreq <- melt(ncorf_aafreq, id = 'AA', value.name = 'count')
+ncorf_aafreq[, c('species', 'type') := tstrsplit(variable, '_')]
+ncorf_aafreq <- ncorf_aafreq[, .(species, type, AA, count)]
+ncorf_aafreq[, frac := count/sum(count), by = .(species, type)]
+fwrite(ncorf_aafreq, 'results/ncorf_AA_suage.tsv', sep = '\t')
+
+plt <- dcast(ncorf_aafreq, species + AA ~ type, value.var = c('count', 'frac'))
+
+plt[, pvalue := {
+    m <- cbind(count_CDS, count_ncORF)
+    ms <- colSums(m)
+    apply(m, 1, function(x){
+        chisq.test(cbind(x, ms - x))$p.value
+    })
+}]
+plt[, padj := p.adjust(pvalue, 'BH'), by = .(species)]
+
+ggplot(plt, aes(x = frac_CDS, y = frac_ncORF, fill = padj < 0.05)) +
+    geom_abline(slope = 1, intercept = 0, linetype=2, color='red') +
+    geom_point(size=3, shape=21, show.legend = FALSE, alpha = 0.6) +
+    ggrepel::geom_text_repel(aes(label = AA)) +
+    scale_fill_manual(values = c('grey', 'black')) +
+    facet_wrap(vars(species), scales = 'free') +
+    coord_cartesian(xlim=c(0, 0.1), ylim = c(0, 0.1)) +
+    labs(x = 'Amino acid frequency in CDSs', y = 'Amino acid frequency in ncORFs')
+ggsave('figures/ncorf_aafreq_vs_ncorf.pdf', width = 8, height = 4)
+```
+
+
+```{r}
+# codon
+get_cds_codon_freq <- function(path_txrep_pcg, path_cds){
+    # path_txrep_pcg <- 'data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv'
+    # path_cds <- 'data/Homo_sapiens.GRCh38.cds.all.fa.gz'
+    txrep_pcg <- fread(path_txrep_pcg)
+    cds <- Biostrings::readDNAStringSet(path_cds)
+    names(cds) <- str_remove(names(cds), r'(\.\d+.*)')
+    cds <- cds[Biostrings::width(cds) >= 150]
+    cds <- cds[names(cds) %in% txrep_pcg$tx_name]
+    cds <- Biostrings::subseq(cds, start = 4, end = Biostrings::width(cds) - 3)
+    cds <- cds[Biostrings::width(cds) %% 3 == 0]
+    cf_cds <- Biostrings::trinucleotideFrequency(cds, step = 3)
+    cft_cds <- data.table(codon = colnames(cf_cds), cnt = colSums(cf_cds))
+    cft_cds <- cft_cds[!codon %in% c('TAA', 'TAG', 'TGA')]
+}
+
+cft_cds_human <- get_cds_codon_freq(
+    'data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv',
+    'data/Homo_sapiens.GRCh38.cds.all.fa.gz')
+
+cft_cds_mouse <- get_cds_codon_freq(
+    'data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv',
+    'data/Mus_musculus.GRCm39.cds.all.fa.gz')
+
+get_ncorf_codon_freq <- function(path_seq_ncorf, ncorf){
+    ncorf_seq <- Biostrings::readDNAStringSet(path_seq_ncorf)
+    ncorf_seq <- Biostrings::subseq(ncorf_seq, start = 4, end = Biostrings::width(ncorf_seq) - 3)
+    cf <- Biostrings::trinucleotideFrequency(ncorf_seq, step = 3)
+    cft <- as.data.table(cf)
+    cft[, uid := names(ncorf_seq)]
+    cft[ncorf, orf_type := i.orf_type, on = .(uid)]
+    cft <- cft[, lapply(.SD, sum), by = .(orf_type), .SDcols = colnames(cf)]
+    cft <- melt(cft, id.vars = 'orf_type', variable.name = 'codon',
+                value.name = 'cnt', variable.factor = FALSE)
+    cft <- cft[!codon %in% c('TAA', 'TAG', 'TGA')]
+}
+
+cft_ncorf_human <- get_ncorf_codon_freq(
+    'data/ncorf_annot/human_three_methods_ncorf.final.nuc.fa', ncorf_human)
+
+cft_ncorf_mouse <- get_ncorf_codon_freq(
+    'data/ncorf_annot/mouse_three_methods_ncorf.final.nuc.fa', ncorf_mouse)
+
+
+cft_ncorf_type <- rbind(Human = cft_ncorf_human, Mouse = cft_ncorf_mouse, idcol = 'species')
+cft_ncorf_type[, prop := cnt/sum(cnt), by = .(species, orf_type)]
+cft_ncorf <- cft_ncorf_type[, .(cnt = sum(cnt)), by = .(species, codon)]
+cft_ncorf[, prop := cnt/sum(cnt), by = .(species)]
+
+cft_cds <- rbind(Human = cft_cds_human, Mouse = cft_cds_mouse, idcol = 'species')
+cft_cds[, prop := cnt/sum(cnt), by = .(species)]
+
+cft_ncorf[cft_cds, `:=`(cnt_cds = i.cnt, prop_cds = i.prop), on = .(species, codon)]
+cft_ncorf[, aacode := Biostrings::GENETIC_CODE[codon]]
+cft_ncorf[, label := str_c(aacode, ':', codon)]
+
+cft_ncorf[, pvalue := {
+    m <- cbind(cnt, cnt_cds)
+    ms <- colSums(m)
+    apply(m, 1, function(x){
+        chisq.test(cbind(x, ms - x))$p.value
+    })
+}, by = .(species)]
+cft_ncorf[, padj := p.adjust(pvalue, 'BH'), by = .(species)]
+
+ggplot(cft_ncorf, aes(x = prop_cds, y = prop, fill = padj < 0.05)) +
+    geom_point(size = 2, shape = 21, alpha = 0.6, show.legend = FALSE) +
+    ggrepel::geom_text_repel(aes(label = label)) +
+    geom_abline(slope = 1, intercept = 0, linetype = 2, color = 'red') +
+    scale_fill_manual(values = c('grey', 'black')) +
+    facet_wrap(vars(species), scales = 'free') +
+    labs(x = 'Codon frequency in CDSs', y = 'Codon frequency in ncORFs')
+ggsave('figures/ncorf_codon_usage_vs_cds.pdf', width = 8, height = 4)
+
+cft_ncorf_type[cft_cds, `:=`(cnt_cds = i.cnt, prop_cds = i.prop), on = .(species, codon)]
+cft_ncorf_type[, aacode := Biostrings::GENETIC_CODE[codon]]
+cft_ncorf_type[, label := str_c(aacode, ':', codon)]
+cft_ncorf_type[, log2R := log2(prop/prop_cds)]
+cft_ncorf_type[, `:=`(rscu = cnt/mean(cnt), rscu_cds = cnt_cds/mean(cnt_cds)), by = .(species, aacode, orf_type)]
+cft_ncorf_type[, log2R := log2(rscu/rscu_cds)]
+
+plt <- copy(cft_ncorf_type)
+plt[, orf_type := tofct_orflevels(orf_type)]
+tmp <- plt[orf_type == 'uORF' & species == 'Human'][order(log2R)]
+plt[, label := factor(label, levels = tmp$label)]
+
+p1 <- ggplot(plt[species == 'Human'], aes(x = label, y = log2R, fill = aacode)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_discrete_c4a_cat('poly.alphabet2') +
+    facet_grid(rows = vars(orf_type)) +
+    labs(y = 'RSCU log2(ncORF/CDS)', x = NULL) +
+    theme(axis.text.x = element_text(
+        angle = 90, hjust = 1, vjust = 0.5))
+
+tmp <- plt[orf_type == 'uORF' & species == 'Mouse'][order(log2R)]
+plt[, label := factor(label, levels = tmp$label)]
+
+p2 <- ggplot(plt[species == 'Mouse'], aes(x = label, y = log2R, fill = aacode)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_discrete_c4a_cat('poly.alphabet2') +
+    facet_grid(rows = vars(orf_type)) +
+    labs(y = 'RSCU log2(ncORF/CDS)', x = NULL) +
+    theme(axis.text.x = element_text(
+        angle = 90, hjust = 1, vjust = 0.5))
+
+p1/p2
+ggsave('figures/ncorf_codon_rscu_vs_cds_bytype.pdf', width = 10, height = 10)
+
+fwrite(cft_ncorf, 'results/ncorf_codon_suage.tsv', sep = '\t')
+fwrite(cft_ncorf_type, 'results/ncorf_codon_suage_bytype.tsv', sep = '\t')
+```

@@ -1,0 +1,399 @@
+---
+title: "Rawdata processing, ncORF prediciton & integradation"
+output: html_document
+---
+
+## data processing
+```{bash}
+# cutadapt
+for i in /nfs_data/changy/poj/ORF/human_riboseq/data/*.fq.gz ; do j=$(basename $i) ; echo "cutadapt -a AGATCGGAAGAGCACACGTCGTAACTCCAGTCAC -j8 --trim-n -m 18 -o data/riboseq/results/human/${j%%.fq.gz}.trim.fa.gz $i > data/riboseq/results/human/${j%%.fq.gz}.trim.log" ; done >> data/riboseq/03_human_cutadapt.sh
+for i in /nfs_data/changy/poj/ORF/mouse/ribo_seq/*.fq.gz ; do j=$(basename $i) ; echo "cutadapt -a AGATCGGAAGAGCACACGTCGTAACTCCAGTCAC -j8 --trim-n -m 18 -o data/riboseq/results/mouse/${j%%.fq.gz}.trim.fa.gz $i > data/riboseq/results/mouse/${j%%.fq.gz}.trim.log" ; done >> data/riboseq/03_mouse_cutadapt.sh
+
+# remove rRNA and tRNA
+for i in data/riboseq/results/human/*.trim.fa.gz ; do echo "bowtie2 -p 8 --local --un-gz ${i%%.fa.gz}.clean.fq.gz -x /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/miscRNA/human_rtRNA -U $i >/dev/null 2>${i%%.fa.gz}.clean.log" ; done > data/riboseq/04_remove_rRNA_human.sh
+for i in data/riboseq/results/mouse/*.trim.fa.gz ; do echo "bowtie2 -p 8 --local --un-gz ${i%%.fa.gz}.clean.fq.gz -x /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/miscRNA/mouse_rtRNA -U $i >/dev/null 2>${i%%.fa.gz}.clean.log" ; done > data/riboseq/04_remove_rRNA_mouse.sh
+
+# STAR mapping
+for i in data/riboseq/results/mouse/*.trim.clean.fq.gz ; do j=$(basename $i) ; echo "STAR --outFilterType BySJout --runThreadN 8 --outFilterMismatchNmax 2 --genomeDir /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/STAR --readFilesIn $i --outFileNamePrefix data/riboseq/results/mouse/STAR/${j%%.trim.clean.fq.gz} --readFilesCommand zcat --outSAMtype BAM SortedByCoordinate --quantMode TranscriptomeSAM GeneCounts --outFilterMultimapNmax 1 --outFilterMatchNmin 16 --alignEndsType EndToEnd --outSAMattributes NH HI AS nM NM MD" ; done > data/riboseq/07_STAR_mouse_all.sh
+for i in data/riboseq/results/human/*.trim.clean.fq.gz ; do j=$(basename $i) ; echo "STAR --outFilterType BySJout --runThreadN 8 --outFilterMismatchNmax 2 --genomeDir /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/STAR --readFilesIn $i --outFileNamePrefix data/riboseq/results/human/STAR/${j%%.trim.clean.fq.gz} --readFilesCommand zcat --outSAMtype BAM SortedByCoordinate --quantMode TranscriptomeSAM GeneCounts --outFilterMultimapNmax 1 --outFilterMatchNmin 16 --alignEndsType EndToEnd --outSAMattributes NH HI AS nM NM MD" ; done > data/riboseq/07_STAR_human_all.sh
+
+# get index
+for i in data/riboseq/results/mouse/STAR/*Aligned.sortedByCoord.out.bam ; do echo "samtools index $i" ; done > data/riboseq/07_getindex_mouse.sh
+for i in data/riboseq/results/human/STAR/*Aligned.sortedByCoord.out.bam ; do echo "samtools index $i" ; done > data/riboseq/07_getindex_human.sh
+```
+
+## ORF prediction
+### PRICE
+```{bash}
+# index genome
+# by default, index files are saved to the same dir as genome fasta and gtf. Meanwhile, create a ~/.gedi/genomic/${name}.oml file
+mkdir price_index_hsa
+/home/admin/local/Gedi_1.0.5/gedi -e IndexGenome -s Homo_sapiens.GRCh38.dna.primary_assembly.fa -a Homo_sapiens.GRCh38.107.gtf -n hsa107 -nostar -nokallisto -nobowtie
+mkdir price_index_mmu
+/home/admin/local/Gedi_1.0.5/gedi -e IndexGenome -s Mus_musculus.GRCm39.dna.primary_assembly.fa -a Mus_musculus.GRCm39.107.gtf -n mmu107 -nostar -nokallisto -nobowtie
+
+# create index dir and soft links to genome sequences annotation
+for i in /nfs_data/database/riboseq/human/*.trim.clean.fq.gz; do j=$(basename $i); echo /home/admin/local/Gedi_1.0.5/gedi -e Price -nthreads 8 -fdr 0.05 -skipmt -reads /nfs_data/leity/poj/forecast/data/riboseq/results/human/STAR/${j%%.trim.clean.fq.gz}Aligned.sortedByCoord.out.bam -genomic hsa107 -prefix ../human/${j%%.trim.clean.fq.gz}; done >01_predict_ORF_human.sh
+for i in /nfs_data/database/riboseq/mouse/*.trim.clean.fq.gz; do j=$(basename $i); echo /home/admin/local/Gedi_1.0.5/gedi -e Price -nthreads 8 -fdr 0.05 -skipmt -reads /nfs_data/leity/poj/forecast/data/riboseq/results/mouse/STAR/${j%%.trim.clean.fq.gz}Aligned.sortedByCoord.out.bam -genomic mmu107 -prefix ../predict/${j%%.trim.clean.fq.gz}; done >01_predict_ORF_mouse.sh
+```
+
+### RiboCode
+```{bash}
+# activate environment and prepare annotation
+source /home/admin/env_mamba.sh
+mamba activate ribocode
+
+# prepare annotation
+prepare_transcripts -g Homo_sapiens.GRCh38.107.gtf -f Homo_sapiens.GRCh38.dna.primary_assembly.fa -o annot_human
+prepare_transcripts -g Mus_musculus.GRCm39.107.gtf -f Mus_musculus.GRCm39.dna.primary_assembly.fa -o annot_mouse
+
+# estimate p-site offsets
+for i in /nfs_data/database/riboseq/human/*.trim.clean.fq.gz; do j=$(basename $i); echo metaplots -a annot_human -f0_percent 0.5 -r /nfs_data/leity/poj/forecast/data/riboseq/results/human/STAR/${j%%.trim.clean.fq.gz}Aligned.toTranscriptome.out.bam -o metaplots/${j%%.trim.clean.fq.gz}.metaplots; done >01_human_metaplots_human.sh
+nohup /home/admin/mambaforge/bin/ParaFly -c 01_human_metaplots.sh -CPU 10 -failed_cmds 01_human_metaplots.failed.sh &
+for i in /nfs_data/database/riboseq/mouse/*.trim.clean.fq.gz; do j=$(basename $i); echo metaplots -a annot_mouse -f0_percent 0.5 -r /nfs_data/leity/poj/forecast/data/riboseq/results/mouse/STAR/${j%%.trim.clean.fq.gz}Aligned.toTranscriptome.out.bam -o ribocode/metaplots/${j%%.trim.clean.fq.gz}.metaplots; done >01_mouse_metaplots_mouse.sh
+
+# predict
+for i in /nfs_data/database/riboseq/human/*.trim.clean.fq.gz; do j=$(basename $i); echo RiboCode -a annot_human -c metaplots/${j%%.trim.clean.fq.gz}.metaplots_pre_config.txt -l no -g -s ATG -A CTG,GTG,TTG -m 5 -o predict/${j%%.trim.clean.fq.gz}.metaplots_pre_config.txt ; done> 02_predict_orf_human.sh
+for i in ribocode/metaplots/*_pre_config.txt; do j=$(basename $i); echo RiboCode -a annot_mouse -c $i -l no -g -s ATG -A CTG,GTG,TTG -m 5 -o ribocode/predict/$j; done>02_predict_ribocode.sh
+```
+
+### Ribo-TISH
+```{bash}
+# quality estimate p-site offsets human
+for i in /nfs_data/database/riboseq/human/*.trim.clean.fq.gz; do j=$(basename $i); echo ribotish quality -b ${j%%.trim.clean.fq.gz}Aligned.sortedByCoord.out.bam -g /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.107.gtf.gz; done >01_psite_offset_human.sh
+for i in /nfs_data/database/riboseq/mouse/*.trim.clean.fq.gz; do j=$(basename $i); echo ribotish quality -b ${j%%.trim.clean.fq.gz}Aligned.sortedByCoord.out.bam -g /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.107.gtf.gz; done >01_psite_offset_mouse.sh
+
+# predict
+for i in /nfs_data/database/riboseq/human/*.trim.clean.fq.gz; do j=$(basename $i); echo ribotish predict -p4 --minaalen 5 --alt --altcodons CTG,GTG,TTG --framebest --fsqth 0.05 -b ${j%%.trim.clean.fq.gz}Aligned.sortedByCoord.out.bam -g /nfs_data/changy/poj/ORF/human_riboseq/Homo_sapiens.GRCh38.107.gtf -f /nfs_data/changy/poj/ORF/human_riboseq/Homo_sapiens.GRCh38.dna.primary_assembly.fa -o ${j%%.trim.clean.fq.gz}_pred.txt; done >02_predict_orfs_human.sh
+for i in /nfs_data/database/riboseq/mouse/*.trim.clean.fq.gz; do j=$(basename $i); echo ribotish predict -p4 --minaalen 5 --alt --altcodons CTG,GTG,TTG --framebest --fsqth 0.05 -b ${j%%.trim.clean.fq.gz}Aligned.sortedByCoord.out.bam -g /nfs_data/changy/poj/ORF/mouse_riboseq/Mus_musculus.GRCm39.107.gtf -f /nfs_data/changy/poj/ORF/mouse_riboseq/Mus_musculus.GRCm39.dna.primary_assembly.fa -o ${j%%.trim.clean.fq.gz}_pred.txt; done >02_predict_orfs_mouse.sh
+```
+
+## Process prediction results of different methods using a unified pipeline with the same set of standards
+### Classify ORFs into different types
+```{bash}
+# PRICE
+for i in price/human/*.orfs.tsv; do j=$(basename $i); echo python /home/admin/scripts/orf_type.py $i Homo_sapiens.GRCh38.107.gtf Homo_sapiens.GRCh38.107.gtf.txinfo -m price -p output_classifier/price/${j%%.orfs.tsv}_PRICE; done > 04_price_classifier_human.sh
+for i in price/predict/*.orfs.tsv; do j=$(basename $i); echo python /home/admin/scripts/orf_type.py $i Mus_musculus.GRCm39.107.gtf Mus_musculus.GRCm39.107.gtf.txinfo -m price -p output_classifier/price/${j%%.orfs.tsv}_PRICE; done > 04_price_classifier_mouse.sh
+
+# RiboCode
+for i in ribocode/predict/*_collapsed.txt ; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_type.py $i Homo_sapiens.GRCh38.107.gtf Homo_sapiens.GRCh38.107.gtf.txinfo -m ribocode -p output_classifier/ribocode/${j%%_collapsed.txt}_RiboCode.txt"; done > 03_RiboCode_classifier_human.sh
+for i in ribocode/predict/*_collapsed.txt ; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_type.py $i Mus_musculus.GRCm39.107.gtf Mus_musculus.GRCm39.107.gtf.txinfo -m ribocode -p output_classifier/ribocode/${j%%_collapsed.txt}_RiboCode.txt"; done > 03_RiboCode_classifier_mouse.sh
+
+## Ribo-TISH
+for i in ribotish/*_pred.txt ; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_type.py $i Homo_sapiens.GRCh38.107.gtf Homo_sapiens.GRCh38.107.gtf.txinfo -m ribotish -p output_classifier/ribotish/${j%%_pred.txt}_RiboTISH" ; done > 03_ribotish_classifier_human.sh
+for i in ribotish/*_pred.txt ; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_type.py $i Mus_musculus.GRCm39.107.gtf Mus_musculus.GRCm39.107.gtf.txinfo -m ribotish -p output_classifier/ribotish/${j%%_pred.txt}_RiboTISH" ; done > 03_ribotish_classifier_mouse.sh
+```
+
+### PSite pipline
+```{bash}
+# PSite train
+for i in data/riboseq/results/human/STAR/*Aligned.toTranscriptome.out.bam ; do j=$(basename $i) ; echo "psite train -i -t principal -e /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.107.appris_canonical.tsv /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.cdna.all.fa.gz $i data/riboseq/results/human/psite/${j%%Aligned.toTranscriptome.out.bam} /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.107.gtf.txinfo" ; done > data/riboseq/07_psite_train_human.sh
+for i in data/riboseq/results/mouse/STAR/*Aligned.toTranscriptome.out.bam ; do j=$(basename $i) ; echo "psite train -i -t principal -e /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.107.appris_canonical.tsv /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.cdna.all.fa.gz $i data/riboseq/results/mouse/psite/${j%%Aligned.toTranscriptome.out.bam} /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.107.gtf.txinfo" ; done > data/riboseq/07_psite_train_mouse.sh
+```
+
+### Quantify the predicted ORFs
+```{bash}
+# ORF quant
+for i in psite_predict/*.genome.psite.sorted.bam ; do j=$(basename $i) ; echo "psite coverage $i orf_quant/${j%%.genome.psite.sorted.bam}" ; done > 09_orfquant_BW_human.sh
+for i in psite_predict/*.genome.psite.sorted.bam ; do j=$(basename $i) ; echo "psite coverage $i orf_quant/${j%%.genome.psite.sorted.bam}" ; done > 09_orfquant_BW_mouse.sh
+
+# TX_BED12
+gppy convert2bed -g Homo_sapiens.GRCh38.107.gtf > Homo_sapiens.GRCh38.107.bed
+gppy convert2bed -g Mus_musculus.GRCm39.107.gtf > Mus_musculus.GRCm39.107.bed
+
+# human
+for i in output_classifier/price/*_PRICE_processed.tsv ; do j=$(basename $i) ;echo "python /home/admin/scripts/orf_quant.py orf_quant/${j%%_PRICE_processed.tsv}_fw.bw orf_quant/${j%%_PRICE_processed.tsv}_rc.bw Homo_sapiens.GRCh38.107.bed $i" ; done > 10_orfquant_price_human.sh
+for i in output_classifier/ribocode/*.metaplots_pre_config.txt_RiboCode.txt_processed.tsv ; do j=$(basename $i) ;echo "python /home/admin/scripts/orf_quant.py orf_quant/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_fw.bw orf_quant/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_rc.bw Homo_sapiens.GRCh38.107.bed $i" ; done > 10_orfquant_ribocode_human.sh
+for i in output_classifier/ribotish/*_RiboTISH_processed.tsv ; do j=$(basename $i) ;echo "python /home/admin/scripts/orf_quant.py orf_quant/${j%%_RiboTISH_processed.tsv}_fw.bw orf_quant/${j%%_RiboTISH_processed.tsv}_rc.bw Homo_sapiens.GRCh38.107.bed $i" ; done > 10_orfquant_ribotish_human.sh
+
+# mouse
+for i in output_classifier/price/*_PRICE_processed.tsv; do j=$(basename $i); echo "python /home/admin/scripts/orf_quant.py orf_quant/${j%%_PRICE_processed.tsv}_fw.bw orf_quant/${j%%_PRICE_processed.tsv}_rc.bw Mus_musculus.GRCm39.107.bed $i" ; done > 10_orfquant_price_mouse.sh
+for i in output_classifier/ribocode/*.metaplots_pre_config.txt_RiboCode.txt_processed.tsv; do j=$(basename $i); echo "python /home/admin/scripts/orf_quant.py orf_quant/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_fw.bw orf_quant/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_rc.bw Mus_musculus.GRCm39.107.bed $i" ; done > 10_orfquant_ribocode_mouse.sh
+for i in output_classifier/ribotish/*_RiboTISH_processed.tsv; do j=$(basename $i); echo "python /home/admin/scripts/orf_quant.py orf_quant/${j%%_RiboTISH_processed.tsv}_fw.bw orf_quant/${j%%_RiboTISH_processed.tsv}_rc.bw Mus_musculus.GRCm39.107.bed $i" ; done > 10_orfquant_ribotish_mouse.sh
+```
+
+### Compute Fragment Length Organization Similarity Score(FLOSS)
+```{bash}
+# get cdsmerge.bed
+gppy convert2bed -t cds -g Homo_sapiens.GRCh38.107.gtf | bedtools bed12tobed6 | bedtools sort | bedtools merge -s -c 4,5,6 -o first > Homo_sapiens.GRCh38.107.bed6
+gppy convert2bed -t cds -g Mus_musculus.GRCm39.107.gtf | bedtools bed12tobed6 | bedtools sort | bedtools merge -s -c 4,5,6 -o first > Mus_musculus.GRCm39.107.bed6
+
+# floss
+# human
+for i in output_classifier/price/*_PRICE_processed.tsv; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_floss.py -p 8 psite_predict/${j%%_PRICE_processed.tsv}.genome.psite.sorted.bam Homo_sapiens.GRCh38.107.gtf Homo_sapiens.GRCh38.107.gtf.txinfo Homo_sapiens.GRCh38.107.bed6 $i -o output_classifier/price/${j%%_processed.tsv}_floss.tsv " ; done > 11_floss_price_human.sh
+for i in output_classifier/ribocode/*.metaplots_pre_config.txt_RiboCode.txt_processed.tsv; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_floss.py -p 8 psite_predict/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}.genome.psite.sorted.bam Homo_sapiens.GRCh38.107.gtf Homo_sapiens.GRCh38.107.gtf.txinfo Homo_sapiens.GRCh38.107.bed6 $i -o output_classifier/ribocode/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_floss.tsv "; done > 11_floss_ribocode_human.sh
+for i in output_classifier/ribotish/*_RiboTISH_processed.tsv; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_floss.py -p 8 psite_predict/${j%%_RiboTISH_processed.tsv}.genome.psite.sorted.bam Homo_sapiens.GRCh38.107.gtf Homo_sapiens.GRCh38.107.gtf.txinfo Homo_sapiens.GRCh38.107.bed6 $i -o output_classifier/ribotish/${j%%_RiboTISH_processed.tsv}_floss.tsv " ; done > 11_floss_ribotish_human.sh
+
+for i in output_classifier/price/*_PRICE_processed.tsv; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_floss.py -p 8 psite_predict/${j%%_PRICE_processed.tsv}.genome.psite.sorted.bam Mus_musculus.GRCm39.107.gtf Mus_musculus.GRCm39.107.gtf.txinfo Mus_musculus.GRCm39.107.bed6 $i -o output_classifier/price/${j%%_processed.tsv}_floss.tsv " ; done > 11_floss_price_mouse.sh
+for i in output_classifier/ribotish/*_RiboTISH_processed.tsv; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_floss.py -p 8 psite_predict/${j%%_RiboTISH_processed.tsv}.genome.psite.sorted.bam Mus_musculus.GRCm39.107.gtf Mus_musculus.GRCm39.107.gtf.txinfo Mus_musculus.GRCm39.107.bed6 $i -o output_classifier/ribotish/${j%%_RiboTISH_processed.tsv}_floss.tsv " ; done > 11_floss_ribotish_mouse.sh
+for i in output_classifier/ribocode/*.metaplots_pre_config.txt_RiboCode.txt_processed.tsv; do j=$(basename $i) ; echo "python /home/admin/scripts/orf_floss.py -p 8 psite_predict/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}.genome.psite.sorted.bam Mus_musculus.GRCm39.107.gtf Mus_musculus.GRCm39.107.gtf.txinfo Mus_musculus.GRCm39.107.bed6 $i -o output_classifier/ribocode/${j%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_floss.tsv "; done > 11_floss_ribocode_mouse.sh
+
+# floss cutoff
+for i in output_classifier/price/*_floss.tsv ; do j=$(basename $i) ; echo "Rscript --vanilla /home/admin/scripts/orf_floss_cutoff.R $i ${i%%.tsv}_cutoff.tsv " ; done > 13_floss_cutoff_price_human.sh
+for i in output_classifier/ribocode/*_floss.tsv ; do j=$(basename $i) ; echo "Rscript --vanilla /home/admin/scripts/orf_floss_cutoff.R $i ${i%%.tsv}_ribocode_cutoff.tsv " ; done > 13_floss_cutoff_ribocode_human.sh
+for i in output_classifier/ribotish/*_floss.tsv ; do j=$(basename $i) ; echo "Rscript --vanilla /home/admin/scripts/orf_floss_cutoff.R $i ${i%%.tsv}_ribotish_cutoff.tsv " ; done > 13_floss_cutoff_ribotish_human.sh
+
+for i in output_classifier/price/*_floss.tsv ; do j=$(basename $i) ; echo "Rscript --vanilla /home/admin/scripts/orf_floss_cutoff.R $i ${i%%.tsv}_cutoff.tsv " ; done > 13_floss_cutoff_price_mouse.sh
+for i in output_classifier/ribocode/*_floss.tsv ; do j=$(basename $i) ; echo "Rscript --vanilla /home/admin/scripts/orf_floss_cutoff.R $i ${i%%.tsv}_ribocode_cutoff.tsv " ; done > 13_floss_cutoff_ribocode_mouse.sh
+for i in output_classifier/ribotish/*_floss.tsv ; do j=$(basename $i) ; echo "Rscript --vanilla /home/admin/scripts/orf_floss_cutoff.R $i ${i%%.tsv}_ribotish_cutoff.tsv " ; done > 13_floss_cutoff_ribotish_mouse.sh
+```
+
+### Extract Kozak sequence context for predicted ORFs
+```{bash}
+# human
+for i in output_classifier/price/*_PRICE_processed.tsv ; do echo "python /home/admin/scripts/orf_kozak.py -i -f /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.cdna_and_ncrna.fa $i > ${i%%_PRICE_processed.tsv}_kozak.tsv " ; done > 12_kozak_prcie_human.sh
+for i in output_classifier/ribocode/*.metaplots_pre_config.txt_RiboCode.txt_processed.tsv; do echo "python /home/admin/scripts/orf_kozak.py -i -f /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.cdna_and_ncrna.fa $i > ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_kozak.tsv " ; done > 12_kozak_ribocode_human.sh
+for i in output_classifier/ribotish/*_RiboTISH_processed.tsv; do echo "python /home/admin/scripts/orf_kozak.py -i -f /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.cdna_and_ncrna.fa $i > ${i%%_RiboTISH_processed.tsv}_kozak.tsv " ; done > 12_kozak_ribotish_human.sh
+
+# mouse
+for i in output_classifier/price/*_PRICE_processed.tsv ; do echo "python /home/admin/scripts/orf_kozak.py -i -f /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.cdna_and_ncrna.fa $i > ${i%%_PRICE_processed.tsv}_kozak.tsv " ; done > 12_kozak_prcie_mouse.sh
+for i in output_classifier/ribocode/*.metaplots_pre_config.txt_RiboCode.txt_processed.tsv; do echo "python /home/admin/scripts/orf_kozak.py -i -f /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.cdna_and_ncrna.fa $i > ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_kozak.tsv " ; done > 12_kozak_ribocode_mouse.sh
+for i in output_classifier/ribotish/*_RiboTISH_processed.tsv; do echo "python /home/admin/scripts/orf_kozak.py -i -f /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.cdna_and_ncrna.fa $i > ${i%%_RiboTISH_processed.tsv}_kozak.tsv " ; done > 12_kozak_ribotish_mouse.sh
+```
+
+### Merge annotation
+```{bash}
+# human
+for i in output_classifier/price/*_processed.tsv ; do echo "python /home/admin/scripts/orf_mergetab.py $i -q ${i%%_processed.tsv}_processed.orfquant.tsv -f ${i%%_processed.tsv}_floss_cutoff.tsv -k ${i%%}_kozak.tsv -o ${i%%_processed.tsv}_merge.tsv" ; done > 14_merge_price_human.sh
+for i in output_classifier/ribocode/*_processed.tsv ; do echo "python /home/admin/scripts/orf_mergetab.py $i -q ${i%%_processed.tsv}_processed.orfquant.tsv -f ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_floss_ribocode_cutoff.tsv -k ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_kozak.tsv -o ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_ribocode_merge.tsv" ; done > 14_merge_ribocode_human.sh
+for i in output_classifier/ribotish/*_processed.tsv ; do echo "python /home/admin/scripts/orf_mergetab.py $i -q ${i%%_processed.tsv}_processed.orfquant.tsv -f ${i%%_RiboTISH_processed.tsv}_floss_ribotish_cutoff.tsv -k ${i%%_RiboTISH_processed.tsv}_kozak.tsv -o ${i%%_RiboTISH_processed.tsv}_ribotish_merge.tsv" ; done > 14_merge_ribotish_human.sh
+
+# mouse
+for i in output_classifier/price/*_processed.tsv ; do echo "python /home/admin/scripts/orf_mergetab.py $i -q ${i%%_processed.tsv}_processed.orfquant.tsv -f ${i%%_processed.tsv}_floss_cutoff.tsv -k ${i%%_PRICE_processed.tsv}_kozak.tsv -o ${i%%_processed.tsv}_merge.tsv" ; done > 14_merge_price_mouse.sh
+for i in output_classifier/ribocode/*_processed.tsv ; do echo "python /home/admin/scripts/orf_mergetab.py $i -q ${i%%_processed.tsv}_processed.orfquant.tsv -f ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_floss_ribocode_cutoff.tsv -k ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_kozak.tsv -o ${i%%.metaplots_pre_config.txt_RiboCode.txt_processed.tsv}_ribocode_merge.tsv" ; done > 14_merge_ribocode_mouse.sh
+for i in output_classifier/ribotish/*_processed.tsv ; do echo "python /home/admin/scripts/orf_mergetab.py $i -q ${i%%_processed.tsv}_processed.orfquant.tsv -f ${i%%_RiboTISH_processed.tsv}_floss_ribotish_cutoff.tsv -k ${i%%_RiboTISH_processed.tsv}_kozak.tsv -o ${i%%_RiboTISH_processed.tsv}_ribotish_merge.tsv" ; done > 14_merge_ribotish_mouse.sh
+```
+
+## filter ncORF
+## extract reads, unique mapping reads, unique mapping reads %, multiple mapping, multiple mapped %
+```{bash}
+ls /nfs_data/leity/poj/forecast/data/riboseq/results/mouse/*Log.final.out |xargs -i python ~admin/scripts/parseStarLog.py {} >mouse_log_final.txt
+ls /nfs_data/leity/poj/forecast/data/riboseq/results/human/*Log.final.out |xargs -i python ~admin/scripts/parseStarLog.py {} >human_log_final.txt
+```
+
+## Number of reads
+```{bash}
+for i in /nfs_data/database/riboseq/human/*.fastq.gz; do j=$(basename $i);echo "zcat $i | wc -l | sed s/^/$i/g"; done > 01_number_of_reads_human
+for i in /nfs_data/database/riboseq/mouse/*.fastq.gz; do j=$(basename $i);echo "zcat $i | wc -l | sed s/^/$i/g"; done > 01_number_of_reads_mouse
+```
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(igraph)
+```
+
+## Three base periodicity
+```{r}
+# human
+file_hsa <- list.files("data/Psite/human_psite", pattern = ".log", full.names = T)
+file <- vector()
+for (i in file_hsa){
+  file <- c(file, rep(i, 3))
+}
+psite_hsa <- lapply(file_hsa, read.table, sep = "\t") %>%
+  bind_rows %>%
+  separate(V1, into = c("frame", "none", "base", "GBT"), sep = "  ") %>%
+  filter(none > 0) %>%
+  mutate(file = file,
+         file = sub("data/Psite/human_psite/", '', file)) %>% 
+  pivot_longer(cols = none:GBT, names_to = "type", values_to = "value") %>%
+  mutate(type = paste0(frame,"_", type)) %>%
+  select(-frame) %>% 
+  pivot_wider(names_from = "type", values_from = "value")
+write_tsv(psite_hsa, "data/Psite/psite_human.tsv")
+
+# mouse
+file_hsa <- list.files("data/Psite/human_psite", pattern = ".log", full.names = T)
+file <- vector()
+for (i in file_hsa){
+  file <- c(file, rep(i, 3))
+}
+psite_hsa <- lapply(file_hsa, read.table, sep = "\t") %>%
+  bind_rows %>%
+  separate(V1, into = c("frame", "none", "base", "GBT"), sep = "  ") %>%
+  filter(none > 0) %>%
+  mutate(file = file,
+         file = sub("data/Psite/human_psite/", '', file)) %>% 
+  pivot_longer(cols = none:GBT, names_to = "type", values_to = "value") %>%
+  mutate(type = paste0(frame,"_", type)) %>%
+  select(-frame) %>% 
+  pivot_wider(names_from = "type", values_from = "value")
+write_tsv(psite_hsa, "data/Psite/psite_human.tsv")
+```
+
+## merge reads, mapping info, Three base periodicity
+  -human:human_library_data_raw.tsv
+  -mouse:mouse_library_data_raw.tsv
+  
+## filter ncORFs
+```{r}
+# human
+data_filter <- function(dtt){
+  data <- read_tsv(dtt) %>%
+    mutate(chrom = as.character(chrom))
+  data_CDS <- data %>%
+    mutate(uid = paste(chrom, gstart, gend, strand, sep = "_")) %>%
+    mutate(uid_start = paste(chrom, gstart, strand, sep = "_"), 
+           uid_end = paste(chrom,  gend, strand, sep = "_")) %>%
+    filter(orf_type %in% c('C_truncation','iCDS','N_extension','N_truncation','sCDS', 'wCDS')) %>%
+    distinct(uid, .keep_all = T)
+  
+  data_ORF <- data %>% 
+    mutate(uid = paste(chrom, gstart, gend, strand, sep = "_"),
+           uid_start = paste(chrom, gstart, strand, sep = "_"),
+           uid_end = paste(chrom,  gend, strand, sep = "_")) %>%
+    filter(orf_type %in% c('uORF','uoORF','dORF','doORF','iORF','lncRNA-ORF')) %>%
+    filter(start_codon %in% c('ATG', 'CTG', 'GTG', 'TTG')) %>%
+    filter(!(uid_start %in% data_CDS$uid_start | uid_end %in% data_CDS$uid_end)) %>%
+    filter(rrs >1, 
+           floss <= floss_ubd,
+           psite_total >=10,
+           orf_len >= 18)
+}
+
+# read file
+SRR_files <- list.files('predict_output/', pattern = '.tsv' , full.names = T)
+names(SRR_files) <- sub('predict_output/.*', '', basename(SRR_files))
+sum_data <- bind_rows(lapply(SRR_files, data_filter), .id = 'id') %>%   
+  mutate(id = gsub('_merge.tsv', '', id)) %>%
+  separate(id, into = c("library", "method"), sep = "_(?=[^_]+$)")
+
+# cluster
+cluster_by_ends <- function(dtt){
+  #' @param dtt a data.table containing the three columns: uid, uid_start, uid_end
+  dtt <- dtt[order(uid_start)]
+  edges_start <- dtt[, .(from = uid, to = data.table::shift(uid, type = 'lead')), by = .(uid_start)]
+  dtt <- dtt[order(uid_end)]
+  edges_end <- dtt[, .(from = uid, to = data.table::shift(uid, type = 'lead')), by = .(uid_end)]
+  
+  uuid_edges <- rbind(edges_start[, 2:3], edges_end[, 2:3])
+  uuid_edges <- unique(uuid_edges[!is.na(to)])
+  
+  uuid_graph <- graph_from_data_frame(uuid_edges, directed = FALSE, vertices = unique(dtt[, .(uid)]))
+  
+  uuid_components <- igraph::groups(components(uuid_graph))
+  length(uuid_components)
+  uuid_clusters <- data.table(
+    uid = unlist(uuid_components),
+    cluster_coord = rep(sprintf('cc%05d', seq_along(uuid_components)), lengths(uuid_components)))
+  dtt[uuid_clusters, on = .(uid)]
+}
+ncorfs_id_clu <- sum_data |>                                                 
+  distinct(uid, uid_start, uid_end) |>
+  as.data.table() |>
+  cluster_by_ends()
+
+bio_mart <- read_tsv("../data/predict_output/ens107_human_mart_export.txt") %>% 
+  mutate(`Transcript support level (TSL)` = sub(' .*', '', `Transcript support level (TSL)`),
+         `Transcript support level (TSL)` = ifelse(is.na(`Transcript support level (TSL)`), 'no_tsl', `Transcript support level (TSL)`),
+         `APPRIS annotation` = ifelse(is.na(`APPRIS annotation`), 'no_principal', `APPRIS annotation`))
+
+bio_mart$`APPRIS annotation` <- factor(bio_mart$`APPRIS annotation`,
+                                       levels = c('principal1', 'principal2', 'principal3',
+                                                  'principal4', 'principal5', 'alternative1','alternative2', 'no_principal'))
+bio_mart$`Transcript support level (TSL)` <- factor(bio_mart$`Transcript support level (TSL)`,
+                                                    levels = c('tsl1', 'tsl2', 'tsl3', 'tsl4', 'tsl5', 'tslNA', 'no_tsl'))
+ncorfs_all <- sum_data %>% 
+  left_join(unique(ncorfs_id_clu[, .(uid, cluster = cluster_coord)]), by = 'uid') %>%
+  group_by(cluster,library) %>%
+  mutate(n_method = n_distinct(method)) %>%
+  filter(n_method >=2) %>%
+  ungroup() %>%
+  group_by(cluster) %>%
+  mutate(n_library = n_distinct(library)) %>%
+  filter(n_library >=2) %>% 
+  left_join(bio_mart[,2:5], by = c('tx_name'='Transcript stable ID')) %>%
+  mutate(start_codon_levels = ifelse(start_codon == 'ATG', '1', 'NA'),
+         start_codon_levels = ifelse(start_codon == 'CTG' | start_codon == 'GTG', '2', start_codon_levels),
+         start_codon_levels = ifelse(start_codon == 'TTG', '3', start_codon_levels)) %>%
+  arrange(`RefSeq match transcript (MANE Select)`, `APPRIS annotation`, `Transcript support level (TSL)`, 
+          start_codon_levels, desc(orf_len)) %>%
+  filter(!duplicated(cluster)) %>%
+  ungroup()
+write_tsv(ncorfs_all, "human_three_methods_ncorf.tsv")
+
+# mouse
+data_filter <- function(dtt){
+  data <- read_tsv(dtt) %>%
+    mutate(chrom = as.character(chrom))
+  data_CDS <- data %>%
+    mutate(uid = paste(chrom, gstart, gend, strand, sep = "_")) %>%
+    mutate(uid_start = paste(chrom, gstart, strand, sep = "_"), 
+           uid_end = paste(chrom,  gend, strand, sep = "_")) %>%
+    filter(orf_type %in% c('C_truncation','iCDS','N_extension','N_truncation','sCDS', 'wCDS')) %>%
+    distinct(uid, .keep_all = T)
+  
+  data_ORF <- data %>% 
+    mutate(uid = paste(chrom, gstart, gend, strand, sep = "_"),
+           uid_start = paste(chrom, gstart, strand, sep = "_"),
+           uid_end = paste(chrom,  gend, strand, sep = "_")) %>%
+    filter(orf_type %in% c('uORF','uoORF','dORF','doORF','iORF','lncRNA-ORF')) %>%
+    filter(start_codon %in% c('ATG', 'CTG', 'GTG', 'TTG')) %>%
+    filter(!(uid_start %in% data_CDS$uid_start | uid_end %in% data_CDS$uid_end)) %>%
+    filter(rrs >1, 
+           floss <= floss_ubd,
+           psite_total >=10,
+           orf_len >= 18)
+}
+
+# read file
+SRR_files <- list.files('predict_output/', pattern = '.tsv' , full.names = T)
+names(SRR_files) <- sub('predict_output/.*', '', basename(SRR_files))
+sum_data <- bind_rows(lapply(SRR_files, data_filter), .id = 'id') %>%   
+  mutate(id = gsub('_merge.tsv', '', id)) %>%
+  separate(id, into = c("library", "method"), sep = "_(?=[^_]+$)")
+
+# cluster
+cluster_by_ends <- function(dtt){
+  #' @param dtt a data.table containing the three columns: uid, uid_start, uid_end
+  dtt <- dtt[order(uid_start)]
+  edges_start <- dtt[, .(from = uid, to = data.table::shift(uid, type = 'lead')), by = .(uid_start)]
+  dtt <- dtt[order(uid_end)]
+  edges_end <- dtt[, .(from = uid, to = data.table::shift(uid, type = 'lead')), by = .(uid_end)]
+  
+  uuid_edges <- rbind(edges_start[, 2:3], edges_end[, 2:3])
+  uuid_edges <- unique(uuid_edges[!is.na(to)])
+  
+  uuid_graph <- graph_from_data_frame(uuid_edges, directed = FALSE, vertices = unique(dtt[, .(uid)]))
+  
+  uuid_components <- igraph::groups(components(uuid_graph))
+  length(uuid_components)
+  uuid_clusters <- data.table(
+    uid = unlist(uuid_components),
+    cluster_coord = rep(sprintf('cc%05d', seq_along(uuid_components)), lengths(uuid_components)))
+  dtt[uuid_clusters, on = .(uid)]
+}
+ncorfs_id_clu <- sum_data |>                                                 
+  distinct(uid, uid_start, uid_end) |>
+  as.data.table() |>
+  cluster_by_ends()
+
+bio_mart <- read_tsv("../data/predict_output/ens107_mouse_mart_export.txt") %>% 
+  mutate(`Transcript support level (TSL)` = sub(' .*', '', `Transcript support level (TSL)`),
+         `Transcript support level (TSL)` = ifelse(is.na(`Transcript support level (TSL)`), 'no_tsl', `Transcript support level (TSL)`),
+         `APPRIS annotation` = ifelse(is.na(`APPRIS annotation`), 'no_principal', `APPRIS annotation`)) 
+bio_mart$`APPRIS annotation` <- factor(bio_mart$`APPRIS annotation`,
+                                       levels = c('principal1', 'principal2', 'principal3',
+                                                  'principal4', 'principal5', 'alternative1','alternative2', 'no_principal'))
+bio_mart$`Transcript support level (TSL)` <- factor(bio_mart$`Transcript support level (TSL)`,
+                                                    levels = c('tsl1', 'tsl2', 'tsl3', 'tsl4', 'tsl5', 'tslNA', 'no_tsl'))
+
+ncorfs_all <- sum_data %>% 
+  left_join(unique(ncorfs_id_clu[, .(uid, cluster = cluster_coord)]), by = 'uid') %>%
+  group_by(cluster,library) %>%
+  mutate(n_method = n_distinct(method)) %>%
+  filter(n_method >=2) %>%
+  ungroup() %>%
+  group_by(cluster) %>%
+  mutate(n_library = n_distinct(library)) %>%
+  filter(n_library >=2) %>%    
+  left_join(bio_mart[,2:4], by = c('tx_name'='Transcript stable ID')) %>%
+  mutate(start_codon_levels = ifelse(start_codon == 'ATG', '1', 'NA'),
+         start_codon_levels = ifelse(start_codon == 'CTG' | start_codon == 'GTG', '2', start_codon_levels),
+         start_codon_levels = ifelse(start_codon == 'TTG', '3', start_codon_levels)) %>%
+  arrange(`APPRIS annotation`, `Transcript support level (TSL)`, start_codon_levels, desc(orf_len)) %>%
+  filter(!duplicated(cluster)) %>%
+  ungroup()
+write_tsv(ncorfs_all, "mouse_three_methods_ncorf.tsv")
+```

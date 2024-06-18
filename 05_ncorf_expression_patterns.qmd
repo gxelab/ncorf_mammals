@@ -1,0 +1,991 @@
+---
+title: "ncORF Expression Patterns"
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+## RNA-Seq expression quantification with salmon
+```{bash}
+# human
+for i in human_salmon_quant/ERR*_1.fastq.gz; do j=$(basename $i); echo salmon quant -p4 --seqBias --gcBias --posBias -i /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/salmon_index -l A -1 $j -2 ${j%%_1.fastq.gz}_2.fastq.gz -o ${j%%_1.fastq.gz};done>01_human_salmon_quant.sh
+# mouse
+for i in ERR*.trim.fq.gz; do echo salmon quant -p8 --seqBias --gcBias --posBias -l A -i /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/salmon_index -r $i -o ${i%%.trim.fq.gz}; done >02_salmon_quant.sh
+```
+
+## Ribo-Seq translation quantificaiton with featureCounts
+```{bash}
+## CDS
+featureCounts -T 16 -s 1 -O -Q 10  -g transcript_id -t CDS -a /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.107.gtf.gz  -o human_all_bam_featureCounts_CDS.txt /nfs_data/leity/poj/forecast/data/riboseq/results/human/STAR/*Aligned.sortedByCoord.out.bam
+featureCounts -T 16 -s 0 -O -Q 10  -g transcript_id -t CDS -a /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.107.gtf.gz -o mouse_all_bam_featureCounts_CDS.txt /nfs_data/leity/poj/forecast/data/riboseq/results/mouse/STAR/*Aligned.sortedByCoord.out.bam
+
+## ncORF
+cat ../data/human_three_methods_final_ncorfs.tsv | awk -v OFS='\t' '{print $4,$9,$10,$56}' >human_tiv4.tsv
+python /nfs_data/changy/poj/ORF/2020_wang_mammals/GTFtools.py tiv2giv -g ../Homo_sapiens.GRCh38.107.gtf -i human_tiv4.tsv -a |awk -v OFS="\t" '{$5 = $4; $4 = $16; for(i=1; i<=12; i++) printf("%s%s", $(i), i<12 ? OFS : "\n");}' >human_ncorf_bed12.bed
+bedtools bed12tobed6 -i human_ncorf_bed12.bed >human_bed6.bed
+cat human_bed6.bed | awk -v OFS='\t' '{print $4,$1,$2=$2+1,$3,$6}' >human_three_methods_ncorf.saf
+featureCounts -T 8 -O -Q 10 -s 1 -a human_three_methods_ncorf.saf -F SAF -o human_all_bam_featureCounts_RPF_ncorf.txt /nfs_data/leity/poj/forecast/data/riboseq/results/human/STAR/*Aligned.sortedByCoord.out.bam
+
+cat ../data/mouse_three_methods_final_ncorfs.tsv | awk -v OFS='\t' '{print $4,$9,$10,$56}' >mouse_tiv4.tsv
+python /nfs_data/changy/poj/ORF/2020_wang_mammals/GTFtools.py tiv2giv -g mouse/Mus_musculus.GRCm39.107.gtf -i mouse_tiv4.tsv -a |awk -v OFS="\t" '{$5 = $4; $4 = $16; for(i=1; i<=12; i++) printf("%s%s", $(i), i<12 ? OFS : "\n");}' >mouse_ncorf_bed12.bed
+bedtools bed12tobed6 -i mouse_ncorf_bed12.bed >mouse_bed6.bed
+cat mouse_bed6.bed | awk -v OFS='\t' '{print $4,$1,$2=$2+1,$3,$6}' >mouse_three_methods_ncorf.saf
+featureCounts -T 8 -O -Q 10 -s 1 -a mouse_three_methods_ncorf.saf -F SAF -o mouse_all_bam_featureCounts_RPF_ncorf.txt /nfs_data/leity/poj/forecast/data/riboseq/results/mouse/STAR/*Aligned.sortedByCoord.out.bam
+```
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(patchwork)
+library(cols4all)
+library(circlize)
+library(stringr)
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+theme_set(theme_classic(base_size = 12) + theme(
+    axis.text = element_text(color = 'black'),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)))
+```
+
+## summarise gene salmon quant
+```{r}
+library(tidyverse)
+
+# human
+salmon_quant_dtt <- function(x){                                                             
+  dtt <- read_tsv(x)                                                   
+}
+SRR_files <- list.files('human_salmon_quant/transcript_quant/', pattern = '.sf' , full.names = T)
+names(SRR_files) <- sub('human_salmon_quant/transcript_quant/.*', '', basename(SRR_files))
+sum_data <- bind_rows(lapply(SRR_files, salmon_quant_dtt), .id = 'id') %>%   
+  mutate(id = gsub('.quant.sf', '', id))
+
+trans_quant <- sum_data %>%
+  mutate(Name = sub("\\.\\d*", "", Name)) %>%
+  left_join(hbiomart, by = c("Name" = 'Transcript stable ID')) %>% 
+  group_by(`Gene stable ID`, id) %>% 
+  summarise(gene_counts = sum(TPM)) %>% 
+  mutate(id = sub("_.*", '', id)) %>%
+  group_by(id, `Gene stable ID`) %>% 
+  summarize(gene_counts_mean = mean(gene_counts)) %>%
+  pivot_wider(names_from = "id", values_from = gene_counts_mean)
+write_tsv(trans_quant, "human_gene_sum_tpm.tsv")
+
+# mouse
+salmon_quant_dtt <- function(x){                                                             
+  dtt <- read_tsv(x)                                                   
+}
+SRR_files <- list.files('transcript_quant/', pattern = '.sf' , full.names = T)
+names(SRR_files) <- sub('transcript_quant/.*', '', basename(SRR_files))
+sum_data <- bind_rows(lapply(SRR_files, salmon_quant_dtt), .id = 'id') %>%   
+  mutate(id = gsub('.quant.sf', '', id))
+tissue <- read_tsv("a_drift_proteome_map_of_mouse.txt") %>%
+  select(1,31)
+sum_data <- sum_data %>%  
+  mutate(Name = sub("\\.\\d*", "", Name)) 
+  left_join(mbiomart, by = c("Name" = "Transcript stable ID")) %>% 
+  group_by(`Gene stable ID`, id) %>% 
+  summarise(gene_counts = sum(TPM))
+sum_data_tissue <- sum_data %>%full_join(tissue, by = c("id" = "Comment[ENA_RUN]"))%>%
+  select(-2)
+trans_quant <- sum_data_tissue %>%
+  pivot_wider(names_from = `Source Name`, values_from = TPM)
+write_tsv(trans_quant, "mouse_gene_sum_tpm.tsv")
+```
+
+## summarise featureCounts
+```{r}
+# human
+human_featurecounts <- read.table("data/expression/human_all_bam_featureCounts_CDS.txt", header = T)
+human_ncorf <- read_tsv("data/predict_output/human_three_methods_ncorf.tsv") %>%
+  distinct(tx_name)
+hcds_counts_all <- human_featurecounts[, c(1,6,7:457)] %>%
+  inner_join(human_ncorf, by = c("Geneid" = "tx_name"))
+colnames(hcds_counts_all) <- gsub("Aligned.sortedByCoord.out.bam", "", colnames(hcds_counts_all))
+colnames(hcds_counts_all) <- gsub("_1", "", colnames(hcds_counts_all))
+colnames(hcds_counts_all) <- gsub("X.nfs_data.leity.poj.forecast.data.riboseq.results.human.STAR.", "", colnames(hcds_counts_all))
+row.names(hcds_counts_all) <- hcds_counts_all$Geneid
+hcds_counts <- hcds_counts_all[,-(1:2)]
+hcds_counts <- as.data.frame(t(hcds_counts))
+hcds_counts$sample <- rownames(hcds_counts)
+
+hcds_count <- hcds_counts %>%
+  inner_join(human_tissue, by = c("sample" = "run_acc")) %>%
+  dplyr::select(-sample)
+rownames(hcds_count) <- hcds_count$re_tissue
+hcds_count <- hcds_count[,-7381] ## hcds_count <- hcds_count[,-110266]
+hcds_count <- as.data.frame(t(hcds_count))
+colnames(hcds_count) <- gsub("_.*", "",colnames(hcds_count))
+hcds_count <- data.frame(t(rowsum(t(hcds_count), group = colnames(hcds_count))))
+write_tsv(hcds_count, "results/expression/human_RPF_cds_counts.tsv")
+
+human_orf <- read.table("data/expression/human_all_bam_featureCounts_RPF_ncorf.txt", header = T)
+horf_counts <- human_orf[, c(1,6,7:457)] 
+colnames(horf_counts) <- gsub("Aligned.sortedByCoord.out.bam", "", colnames(horf_counts))
+colnames(horf_counts) <- gsub("X.nfs_data.leity.poj.forecast.data.riboseq.results.human.STAR.", "", colnames(horf_counts))
+row.names(horf_counts) <- horf_counts$Geneid
+horf_counts <- horf_counts[,-(1:2)]
+horf_counts <- as.data.frame(t(horf_counts))
+horf_counts$sample <- rownames(horf_counts)
+horf_count <- horf_counts %>%
+  inner_join(human_tissue, by = c("sample" = "run_acc")) %>%
+  dplyr::select(-sample)
+rownames(horf_count) <- horf_count$re_tissue
+horf_count <- horf_count[,-13072]
+horf_count <- as.data.frame(t(horf_count))
+colnames(horf_count) <- gsub("_.*", "",colnames(horf_count))
+horf_count <- data.frame(t(rowsum(t(horf_count), group = colnames(horf_count))))
+write_tsv(horf_count, "results/expression/human_RPF_ncorf_counts.tsv")
+
+# mouse
+mouse_featurecounts <- read.table("data/expression/mouse_all_bam_featureCounts_CDS.txt", header = T)
+mouse_ncorf <- read_tsv("data/predict_output/mouse_three_methods_ncorf.tsv") %>%
+  distinct(tx_name)
+mcds_counts_all <- mouse_featurecounts[, c(1,6,7:465)] %>%
+  inner_join(mouse_ncorf, by = c("Geneid" = "tx_name"))
+colnames(mcds_counts_all) <- gsub("Aligned.sortedByCoord.out.bam", "", colnames(mcds_counts_all))
+colnames(mcds_counts_all) <- gsub("_1", "", colnames(mcds_counts_all))
+colnames(mcds_counts_all) <- gsub("X.nfs_data.leity.poj.forecast.data.riboseq.results.mouse.STAR.", "", colnames(mcds_counts_all))
+row.names(mcds_counts_all) <- mcds_counts_all$Geneid
+mcds_counts <- mcds_counts_all[,-(1:2)]
+mcds_counts <- as.data.frame(t(mcds_counts))
+mcds_counts$sample <- rownames(mcds_counts)
+mcds_count <- mcds_counts %>%
+  inner_join(mouse_tissue, by = c("sample" = "run_acc")) %>%
+  dplyr::select(-sample)
+rownames(mcds_count) <- mcds_count$re_tissue
+mcds_count <- mcds_count[,-9052] # mcds_count <- mcds_count[,-67153]
+mcds_count <- as.data.frame(t(mcds_count))
+colnames(mcds_count) <- gsub("_.*", "",colnames(mcds_count))
+mcds_count <- data.frame(t(rowsum(t(mcds_count), group = colnames(mcds_count))))
+write_tsv(mcds_count, "results/expression/mouse_RPF_cds_counts.tsv")
+
+mouse_orf <- read.table("data/expression/mouse_all_bam_featureCounts_RPF_ncorf.txt", header = T)
+morf_counts <- mouse_orf[, c(1,6,7:465)] 
+colnames(morf_counts) <- gsub("Aligned.sortedByCoord.out.bam", "", colnames(morf_counts))
+colnames(morf_counts) <- gsub("X.nfs_data.leity.poj.forecast.data.riboseq.results.mouse.STAR.", "", colnames(morf_counts))
+row.names(morf_counts) <- morf_counts$Geneid
+morf_counts <- morf_counts[,-(1:2)]
+morf_counts <- as.data.frame(t(morf_counts))
+morf_counts$sample <- rownames(morf_counts)
+morf_count <- morf_counts %>%
+  inner_join(mouse_tissue, by = c("sample" = "run_acc")) %>%
+  dplyr::select(-sample)
+rownames(morf_count) <- morf_count$re_tissue
+morf_count <- morf_count[,-17675]
+morf_count <- as.data.frame(t(morf_count))
+colnames(morf_count) <- gsub("_.*", "",colnames(morf_count))
+morf_count <- data.frame(t(rowsum(t(morf_count), group = colnames(morf_count))))
+write_tsv(morf_count, "results/expression/mouse_RPF_ncorf_counts.tsv")
+```
+
+## gene & ncORF info
+```{r}
+txinfo_hsa <- fread('data/Homo_sapiens.GRCh38.107.txinfo.full.tsv')
+txrep_hsa <- fread('data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv')
+
+txinfo_mmu <- fread('data/Mus_musculus.GRCm39.107.txinfo.full.tsv')
+txrep_mmu <- fread('data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv')
+
+ncorf_human <- fread('data/ncorf_annot/human_three_methods_ncorf.final.tsv')
+ncorf_mouse <- fread('data/ncorf_annot/mouse_three_methods_ncorf.final.tsv')
+
+ncorf_human[, gstart := as.integer(tstrsplit(uid_start, '_')[[2]])]
+ncorf_mouse[, gstart := as.integer(tstrsplit(uid_start, '_')[[2]])]
+
+# obtain CDS start and end information
+cds_human <- fread('data/Homo_sapiens.GRCh38.107.gtf.gz', skip = 1, header = FALSE)
+cds_human <- cds_human[V3 == 'CDS']
+cds_human[, tx_name := str_extract(V9, 'transcript_id "(ENST\\d+)"', group = 1)]
+cds_human <- cds_human[, .(
+    start = ifelse(V7[1] == '+', min(V4), max(V5)),
+    end = ifelse(V7[1] == '+', max(V5), min(V4))), by = .(tx_name)]
+txrep_hsa[cds_human, `:=`(start = i.start, end = i.end), on = .(tx_name)]
+
+# CDS overlap
+cdsovlp_human <- fread('data/ncorf_annot/human_three_methods_ncorf.cds_overlap.tsv', header = FALSE)
+cdsovlp_human <- cdsovlp_human[V13 > 0]
+
+cdsovlp_mouse <- fread('data/ncorf_annot/mouse_three_methods_ncorf.cds_overlap.tsv', header = FALSE)
+cdsovlp_mouse <- cdsovlp_mouse[V13 > 0]
+```
+
+### prepare data
+the following samples have too few reads and were excluded from the analysis:
+- human: skeletal muscle
+- mouse: cortex
+```{r}
+txl_cds_human <- fread('data/expression/human_RPF_cds_counts.tsv.gz')
+txl_cds_human[, `Skeketal muscle` := NULL]
+sname_old_human <- c(
+    'Hs578t', 'MCardiac fibroblasts7', 'Molm13', 'Lymphoblastoid cell line',
+    "B lymphoblastoid cell line", "Aortic endothelial cell",
+    "Coronary artery endothelial cell", "Umbilical vein endothelial", "Fat")
+sname_new_human <- c(
+    'Hs578T', 'MCF7', 'MOLM-13', 'LCL', "B721.221", 'Aortic EC',
+    'Coronary artery EC', "Umbilical vein EC", "Adipose tissue")
+setnames(txl_cds_human, sname_old_human, sname_new_human)
+
+txl_cds_human <- txl_cds_human[txid %in% txrep_hsa$tx_name]
+txl_cds_human[txrep_hsa, `:=`(uid = i.gene_id, len = i.tx_len), on = .(txid = tx_name)]
+txl_cds_human[, txid := NULL]
+txl_cds_human[, gtype := 'CDS']
+
+txl_orf_human <- fread('data/expression/human_RPF_ncorf_counts.tsv.gz')
+txl_orf_human[, `Skeketal muscle` := NULL]
+setnames(txl_orf_human, sname_old_human, sname_new_human)
+txl_orf_human <- txl_orf_human[uid %in% ncorf_human$uid]
+txl_orf_human[ncorf_human, len := i.orf_len, on = .(uid)]
+txl_orf_human[, gtype := 'ncORF']
+
+txl_human <- rbind(txl_cds_human, txl_orf_human)
+txl_human[, total_cnts := rowSums(.SD),
+          .SDcols = setdiff(colnames(txl_human), c('uid', 'len', 'gtype'))]
+
+txlmat_human <- as.matrix(txl_human[, !c('uid', 'len', 'gtype', 'total_cnts')])
+sf_human <- DESeq2::estimateSizeFactorsForMatrix(txlmat_human[txl_human$gtype == 'CDS' & rowSums(txlmat_human) > 100, ])
+txlmat_human <- sweep(txlmat_human, 2, sf_human, '/')
+txl_norm_human <- cbind(as.data.table(txlmat_human), txl_human[, .(uid, len, gtype)])
+
+fwrite(txl_norm_human, 'results/human_RPF_counts_norm_cds_ncorf.tsv', sep = '\t')
+
+
+txl_cds_mouse <- fread('data/expression/mouse_RPF_cds_counts.tsv.gz')
+txl_cds_mouse[, Cortex := NULL]
+sname_old_mouse <- c(
+    'Flt3L DC', 'PMB', 'TALL', 'X3T3 cell', 'NeoCortex')
+sname_new_mouse <- c('FLT3L-DC', 'CD19+ B cell', 'T-ALL', '3T3', 'Neocortex')
+setnames(txl_cds_mouse, sname_old_mouse, sname_new_mouse)
+
+txl_cds_mouse <- txl_cds_mouse[txid %in% txrep_mmu$tx_name]
+txl_cds_mouse[txrep_mmu, `:=`(uid = i.gene_id, len = i.tx_len), on = .(txid = tx_name)]
+txl_cds_mouse[, txid := NULL]
+txl_cds_mouse[, gtype := 'CDS']
+
+txl_orf_mouse <- fread('data/expression/mouse_RPF_ncorf_counts.tsv.gz')
+txl_orf_mouse[, Cortex := NULL]
+setnames(txl_orf_mouse, sname_old_mouse, sname_new_mouse)
+txl_orf_mouse <- txl_orf_mouse[uid %in% ncorf_mouse$uid]
+txl_orf_mouse[ncorf_mouse, len := i.orf_len, on = .(uid)]
+txl_orf_mouse[, gtype := 'ncORF']
+
+txl_mouse <- rbind(txl_cds_mouse, txl_orf_mouse)
+txl_mouse[, total_cnts := rowSums(.SD),
+          .SDcols = setdiff(colnames(txl_mouse), c('uid', 'len', 'gtype'))]
+
+txlmat_mouse <- as.matrix(txl_mouse[, !c('uid', 'len', 'gtype', 'total_cnts')])
+sf_mouse <- DESeq2::estimateSizeFactorsForMatrix(txlmat_mouse[txl_mouse$gtype == 'CDS' & rowSums(txlmat_mouse) > 100, ])
+txlmat_mouse <- sweep(txlmat_mouse, 2, sf_mouse, '/')
+txl_norm_mouse <- cbind(as.data.table(txlmat_mouse), txl_mouse[, .(uid, len, gtype)])
+
+fwrite(txl_norm_mouse, 'results/mouse_RPF_counts_norm_cds_ncorf.tsv', sep = '\t')
+```
+
+### constrained ncORFs
+```{r}
+ncorf_cons <- fread('results/ncorfs_bls_phylocsf.tsv')
+ncorf_cons <- ncorf_cons[method == 'ASR']
+
+ncorf_cons[, grp := fcase(
+    phylocsf > 0 & bls_local > 0.9, 'Local BLS > 0.9 & PhyloCSF > 0',
+    default = 'Other'
+)]
+ncorf_cons[, grp2 := fcase(
+    phylocsf > 0 & bls_local > 0.9, 'Local BLS > 0.9 & PhyloCSF > 0',
+    phylocsf > 0 & bls_local <= 0.9, 'PhyloCSF > 0',
+    default = 'Other'
+)]
+
+calc_rpkm <- function(dtt){
+    m <- as.matrix(dtt[, !c('uid', 'len', 'gtype')])
+    # as the counts are normalized, we will use a universal median library size
+    libsize <- median(colSums(m))
+    m <- m / dtt$len / libsize * 1e9
+    cbind(as.data.table(m), dtt[, .(uid, len, gtype)])
+}
+
+combine_exp <- function(dtt_raw, dtt_norm, dtt_rpkm){
+    long1 <- melt(dtt_raw, id.vars = c('uid', 'len', 'gtype'),
+                  variable.name = 'sample', value.name = 'cnt', variable.factor = FALSE)
+    long2 <- melt(dtt_norm, id.vars = c('uid', 'len', 'gtype'),
+                  variable.name = 'sample', value.name = 'cnt_norm', variable.factor = FALSE)
+    long3 <- melt(dtt_rpkm, id.vars = c('uid', 'len', 'gtype'),
+                  variable.name = 'sample', value.name = 'rpkm', variable.factor = FALSE)
+    dtt <- merge(long1, long2, by = c('uid', 'len', 'gtype', 'sample'))
+    dtt <- merge(dtt, long3, by = c('uid', 'len', 'gtype', 'sample'))
+    return(dtt)
+}
+
+# human ------------------------------------------------------------------------------------
+txl_rpkm_human <- calc_rpkm(txl_norm_human)
+
+comb_human <- combine_exp(txl_human, txl_norm_human, txl_rpkm_human)
+comb_human[ncorf_cons, grp := i.grp, on = .(uid)]
+comb_human[gtype == 'CDS', grp := 'CDS']
+
+comb_human_cut <- comb_human[rpkm >= 1 & cnt >= 10]
+comb_human_tcn <- comb_human_cut[, .(
+    med_cds = median(rpkm[gtype == 'CDS']),
+    med_ncorf = median(rpkm[gtype == 'ncORF']),
+    p = wilcox.test(rpkm[gtype == 'CDS'], rpkm[gtype == 'ncORF'])$p.value
+), by = .(sample)]
+comb_human_tcn[, plabel := str_c("italic(P)==", scales::scientific(p, digits = 2))]
+
+ggplot(comb_human_cut, aes(x = rpkm)) +
+    geom_histogram(aes(fill = gtype), position = 'identity', alpha = 0.6) +
+    geom_text(data = comb_human_tcn, aes(x = 30, y = 1400, label = plabel),
+              parse = TRUE, hjust = 0.5) +
+    facet_wrap(vars(sample), ncol = 4) +
+    scale_x_log10() +
+    scale_fill_discrete_c4a_cat('carto.vivid') +
+    coord_cartesian(xlim = c(1, 1000)) +
+    labs(x = 'Translation level (RPKM)', y = 'Number of ORFs', fill = NULL)
+ggsave('figures/human_ncORF_CDS_RPF_RPKM_histogram.pdf', width = 10, height = 12)
+
+comb_human_summary <- comb_human[, .(
+    total = .N, translated = sum(rpkm >= 1 & cnt >= 10)), by = .(sample, gtype)]
+comb_human_summary[, prop := translated/total]
+
+# mouse ---------------------------------------------------------------------------------------
+txl_rpkm_mouse <- calc_rpkm(txl_norm_mouse)
+
+comb_mouse <- combine_exp(txl_mouse, txl_norm_mouse, txl_rpkm_mouse)
+comb_mouse[ncorf_cons, grp := i.grp, on = .(uid)]
+comb_mouse[gtype == 'CDS', grp := 'CDS']
+
+comb_mouse_cut <- comb_mouse[rpkm >= 1 & cnt >= 10]
+comb_mouse_tcn <- comb_mouse_cut[, .(
+    med_cds = median(rpkm[gtype == 'CDS']),
+    med_ncorf = median(rpkm[gtype == 'ncORF']),
+    p = wilcox.test(rpkm[gtype == 'CDS'], rpkm[gtype == 'ncORF'])$p.value
+), by = .(sample)]
+comb_mouse_tcn[, plabel := str_c("italic(P)==", scales::scientific(p, digits = 2))]
+
+ggplot(comb_mouse_cut, aes(x = rpkm)) +
+    geom_histogram(aes(fill = gtype), position = 'identity', alpha = 0.6) +
+    geom_text(data = comb_mouse_tcn, aes(x = 30, y = 1400, label = plabel),
+              parse = TRUE, hjust = 0.5) +
+    facet_wrap(vars(sample), ncol = 4) +
+    scale_x_log10() +
+    scale_fill_discrete_c4a_cat('carto.vivid') +
+    coord_cartesian(xlim = c(1, 1000)) +
+    labs(x = 'RPF RPKM', y = 'Number of CDSs or ncORFs', fill = NULL)
+ggsave('figures/mouse_ncORF_CDS_RPF_RPKM_histogram.pdf', width = 10, height = 12)
+
+comb_mouse_summary <- comb_mouse[, .(
+    total = .N, translated = sum(rpkm >= 1 & cnt >= 10)), by = .(sample, gtype)]
+comb_mouse_summary[, prop := translated/total]
+
+# -------------------------------------------------------------------------
+p1 <- ggplot(comb_human_summary, aes(x = prop, y = sample, fill = gtype)) +
+    geom_col(position = position_dodge(width = 0.75), width = 0.75) +
+    scale_x_continuous(labels = scales::percent) +
+    labs(x = 'Translated ORFs', y = NULL, fill = NULL, title = 'Human') +
+    scale_fill_discrete_c4a_cat('carto.vivid')
+
+p2 <- ggplot(comb_mouse_summary, aes(x = prop, y = sample, fill = gtype)) +
+    geom_col(position = position_dodge(width = 0.75), width = 0.75) +
+    scale_x_continuous(labels = scales::percent) +
+    labs(x = 'Translated ORFs', y = NULL, fill = NULL, title = 'Mouse') +
+    scale_fill_discrete_c4a_cat('carto.vivid')
+
+p1 + p2 + plot_layout(guides = 'collect')
+ggsave('figures/prop_translated_orfs_per_sample.pdf', width = 8, height = 8)
+
+comb_human_summary[, as.list(summary(prop)), by = .(gtype)]
+# "   gtype       Min.   1st Qu.    Median      Mean   3rd Qu.      Max.
+#    <char>      <num>     <num>     <num>     <num>     <num>     <num>
+# 1:  ncORF 0.09856444 0.6739514 0.7464913 0.6997380 0.7648969 0.8418478
+# 2:    CDS 0.48123134 0.5130426 0.5246170 0.5350724 0.5350536 0.6591298"
+
+comb_mouse_summary[, as.list(summary(prop)), by = .(gtype)]
+# "   gtype       Min.   1st Qu.    Median      Mean   3rd Qu.      Max.
+#    <char>      <num>     <num>     <num>     <num>     <num>     <num>
+# 1:  ncORF 0.01951651 0.1559110 0.4428066 0.4003664 0.6081810 0.7496462
+# 2:    CDS 0.26081731 0.4416066 0.4856882 0.4688825 0.5112847 0.5993590"
+
+
+plt <- rbind(Human = comb_human_tcn, Mouse = comb_mouse_tcn, idcol = 'species')
+ggplot(plt, aes(x = med_cds, y = med_ncorf, color = p < 0.05)) +
+    geom_point(show.legend = FALSE) +
+    scale_x_log10(limits = c(4, 32), breaks=c(4, 8, 16, 32)) +
+    scale_y_log10() +
+    scale_color_manual(values = c('grey', 'black')) +
+    geom_abline(slope = 1, intercept = 0, linetype = 2, color = 'red') +
+    labs(x = 'Median RPF RPKM of CDSs', y = 'Median RPF RPKM of ncORFs') +
+    facet_wrap(vars(species), scales = 'free')
+ggsave('figures/ncorf_cds_translation_comparison_summary.pdf', width = 6, height = 3)
+
+grp_summary_human <- comb_human[, .(
+    total = .N, translated = sum(rpkm >= 1 & cnt >= 10)), keyby = .(sample, grp)]
+grp_summary_human[, prop := translated/total]
+grp_levels <- c('CDS', 'Local BLS > 0.9 & PhyloCSF > 0', 'Other')
+grp_labels <- c('CDS', 'Local BLS > 0.9\n& PhyloCSF > 0', 'Other')
+grp_summary_human[, grp := factor(grp, grp_levels, grp_labels)]
+grp_summary_human <- grp_summary_human[order(sample, grp)]
+
+grp_summary_mouse <- comb_mouse[, .(
+    total = .N, translated = sum(rpkm >= 1 & cnt >= 10)), keyby = .(sample, grp)]
+grp_summary_mouse[, prop := translated/total]
+grp_summary_mouse[, grp := factor(grp, grp_levels, grp_labels)]
+grp_summary_mouse <- grp_summary_mouse[order(sample, grp)]
+
+
+plt <- rbind(Human = grp_summary_human, Mouse = grp_summary_mouse, idcol = 'species')
+ggplot(plt[grp != 'CDS'], aes(x = grp, y = prop)) +
+    geom_line(aes(group = sample), color = 'grey', alpha = 0.6) +
+    geom_boxplot(notch = FALSE, alpha = 0.6) +
+    labs(x = NULL, y = 'Fraction of translated ncORFs') +
+    facet_wrap('species', scales = 'free')
+ggsave('figures/ncorf_cds_translation_prop_comparison_summary.pdf', width = 6, height = 3)
+
+
+tmp <- dcast(grp_summary_human, sample ~ grp, value.var = 'prop')
+tmp[, wilcox.test(`Local BLS > 0.9\n& PhyloCSF > 0`,  Other,
+                  paired = TRUE, alternative = 'greater')$p.value]  # 4.656613e-09
+
+tmp <- dcast(grp_summary_mouse, sample ~ grp, value.var = 'prop')
+tmp[, wilcox.test(`Local BLS > 0.9\n& PhyloCSF > 0`,  Other,
+                  paired = TRUE, alternative = 'greater')$p.value]  # 2.273737e-13
+```
+
+### tissue-specificity
+```{r}
+calc_tau <- function(m){
+    m <- log1p(m)
+    m <- m/apply(m, 1, max)
+    tau <- rowSums(1 - m) /(ncol(m) - 1)
+    return(tau)
+}
+
+rna_tau <- function(dtt, cutoff = 1){
+    m <- as.matrix(dtt[, -1, with = FALSE])
+    tau <- calc_tau(m)
+    data.table(id = dtt[[1]],
+               tau_rna = tau,
+               ns_rna = rowSums(m >= cutoff),
+               nz_rna = rowSums(m > 0),
+               max_rna = colnames(m)[apply(m, 1, which.max)])
+}
+
+rpf_tau <- function(dtt1, dtt2, cutoff1 = 10, cutoff2 = 1){
+    ecols <- c('uid', 'len', 'gtype')
+    m1 <- as.matrix(dtt1[, !..ecols])
+    tau <- calc_tau(m1)
+    m2 <- as.matrix(dtt2[, !..ecols])
+    data.table(id = dtt1[['uid']],
+               tau_rpf = tau,
+               ns_rpf = rowSums(m1 >= cutoff1 & m2 >= cutoff2),
+               nz_rpf = rowSums(m1 > 0),
+               max_rpf = colnames(m1)[apply(m1, 1, which.max)])
+}
+
+path_txp_human <- 'data/expression/human_salmon_quant_32_tissues.tsv.gz'
+path_txp_mouse <- 'data/expression/mouse_salmon_quant_29_tissues.tsv.gz'
+tau_tsp_human <- rna_tau(fread(path_txp_human))
+tau_tsp_mouse <- rna_tau(fread(path_txp_mouse))
+
+tau_txl_human <- rpf_tau(txl_norm_human, txl_rpkm_human)
+tau_txl_mouse <- rpf_tau(txl_norm_mouse, txl_rpkm_mouse)
+
+ncorf_human[tau_tsp_human, `:=`(
+    tau_rna = i.tau_rna, ns_rna = i.ns_rna, max_rna = i.max_rna), on = .(gene_id = id)]
+ncorf_human[tau_txl_human, `:=`(
+    tau_rpf = i.tau_rpf, ns_rpf = i.ns_rpf, max_rpf = i.max_rpf), on = .(uid = id)]
+
+ncorf_mouse[tau_tsp_mouse, `:=`(
+    tau_rna = i.tau_rna, ns_rna = i.ns_rna, max_rna = i.max_rna), on = .(gene_id = id)]
+ncorf_mouse[tau_txl_mouse, `:=`(
+    tau_rpf = i.tau_rpf, ns_rpf = i.ns_rpf, max_rpf = i.max_rpf), on = .(uid = id)]
+
+ncorf_tau <- rbind(
+    Human = ncorf_human[, .(uid, tau_rpf, ns_rpf, max_rpf, tau_rna, ns_rna, max_rna)],
+    Mouse = ncorf_mouse[, .(uid, tau_rpf, ns_rpf, max_rpf, tau_rna, ns_rna, max_rna)], idcol = 'species')
+
+plt <- merge(ncorf_cons, ncorf_tau, by = c('species', 'uid'))
+plt[, grp := factor(grp, levels = grp_levels, labels = grp_labels)]
+
+ggplot(plt[ns_rpf > 0], aes(x = grp, y = tau_rpf)) +
+    geom_violin(aes(fill = grp), show.legend = FALSE) +
+    geom_boxplot(width = 0.08, outliers = FALSE) +
+    scale_fill_discrete_c4a_cat('carto.pastel') +
+    facet_wrap(vars(species)) +
+    labs(x = NULL, y = expression(italic(tau)~"(RPF)"))
+ggsave('figures/ncORF_conservation_vs_txl_specificity.pdf', width = 5, height = 3)
+
+plt[ns_rpf > 0, wilcox.test(
+    tau_rpf[grp == 'Other'], tau_rpf[grp != 'Other'])$p.value, by = .(species)]
+# "Key: <species>
+#    species           V1
+#     <char>        <num>
+# 1:   Human 8.101074e-04
+# 2:   Mouse 1.892423e-13
+
+
+ggplot(plt[ns_rna > 0], aes(x = grp, y = tau_rna)) +
+    geom_violin(aes(fill = grp), show.legend = FALSE) +
+    geom_boxplot(width = 0.08, outliers = FALSE) +
+    scale_fill_discrete_c4a_cat('carto.pastel') +
+    facet_wrap(vars(species)) +
+    labs(x = NULL, y = expression(italic(tau)~"(RNA)"))
+ggsave('figures/ncORF_conservation_vs_txp_specificity.pdf', width = 5, height = 3)
+
+plt[ns_rna > 0, wilcox.test(
+    tau_rna[grp == 'Other'], tau_rna[grp != 'Other'])$p.value, by = .(species)]
+# "Key: <species>
+#    species           V1
+#     <char>        <num>
+# 1:   Human 4.302494e-01
+# 2:   Mouse 2.222313e-15
+
+m4heat_rpf <- function(dtt_cnts, dtt_rpkm, cutoff_cnts=10, cutoff_rpkm=1, sgtype='ncORF'){
+    dtt_cnts <- dtt_cnts[gtype == sgtype]
+    dtt_rpkm <- dtt_rpkm[gtype == sgtype]
+    ecols <- c('uid', 'len', 'gtype', 'total_cnts')
+    m1 <- as.matrix(dtt_cnts[, !..ecols])
+    # tau <- calc_tau(m1)
+    m2 <- as.matrix(dtt_rpkm[, !..ecols])
+    rownames(m2) <- dtt_cnts[['uid']]
+    m1 <- m1[, sort(colnames(m2))]
+    m2 <- m2[, sort(colnames(m2))]
+    m2_scale <- (m2 - rowMeans(m2))/apply(m2, 1, sd)
+    stat <- data.table(
+        id = dtt_cnts[['uid']],
+        # tau = tau,
+        ns = rowSums(m1 >= cutoff_cnts & m2 >= cutoff_rpkm),
+        nz = rowSums(m1 > 0),
+        max_sample = colnames(m2)[apply(m2, 1, which.max)],
+        max_rpkm = apply(m2_scale, 1, max))
+    stat[, max_sample := factor(max_sample, levels = colnames(m2))]
+    stat <- stat[order(max_sample, -max_rpkm)]
+    m2 <- m2[stat$id, ]
+   
+}
+
+colfun <- colorRamp2(c(-4, 0, 4), c("blue", "white", "red"))
+
+pdf('figures/ncorf_exp_heatmap_rpf_human.pdf', width = 10, height = 5)
+m <- m4heat_rpf(txl_human, txl_rpkm_human)
+pheatmap(
+    log(m + 1), show_rownames = FALSE,
+    color = colfun, name = 'Z score',
+    scale = 'row',
+    cluster_rows = FALSE, cluster_cols = FALSE,
+    raster_quality = 4
+)
+dev.off()
+
+pdf('figures/ncorf_exp_heatmap_rpf_mouse.pdf', width = 10, height = 5)
+m <- m4heat_rpf(txl_mouse, txl_rpkm_mouse)
+pheatmap(
+    log(m + 1), show_rownames = FALSE,
+    color = colfun, name = 'Z score',
+    scale = 'row',
+    cluster_rows = FALSE, cluster_cols = FALSE,
+    raster_quality = 4
+)
+dev.off()
+
+m4heat_rna <- function(ncorfs, tpm, tpm_cutoff=1){
+    m <- as.matrix(tpm[, -1, with = FALSE])
+    rownames(m) <- tpm[[1]]
+    m <- m[, sort(colnames(m))]
+    m_scale <- (m - rowMeans(m))/apply(m, 1, sd)
+    # tau <- calc_tau(m)
+    stat <- data.table(
+        gene_id = tpm[[1]],
+        # tau_rna = tau,
+        ns = rowSums(m >= tpm_cutoff),
+        nz = rowSums(m > 0),
+        max_tpm = apply(m_scale, 1, max),
+        max_sample = colnames(m)[apply(m, 1, which.max)])
+    stat <- merge(ncorfs[, .(uid, gene_id)], stat, by = 'gene_id')
+    stat <- stat[ns > 0]
+    stat[, max_sample := factor(max_sample, levels = colnames(m))]
+    stat <- stat[order(max_sample, -max_tpm)]
+    m <- m[stat$gene_id, ]
+}
+
+snmap_rna_human <- setNames(
+    str_to_sentence(c(
+        "adrenal", "appendix", "bonem arrow", "brain", "colon", "duodenum", 
+        "endometrium", "esophagus", "fallopian tube", "fat", "gall bladder", 
+        "heart", "kidney", "liver", "lung", "lymphnode", "ovary", "pancreas", 
+        "placenta", "prostate", "rectum", "salivary gland", "skeletal muscle", 
+        "skin", "small intestine", "smooth muscle", "spleen", "stomach", 
+        "testis", "thyroid", "tonsil", "urinary bladder"
+    )),
+    c("adrenal", "appendix", "bonemarrow", "brain", "colon", "duodenum", 
+      "endometrium", "esophagus", "fallopiantube", "fat", "gallbladder", 
+      "heart", "kidney", "liver", "lung", "lymphnode", "ovary", "pancreas", 
+      "placenta", "prostate", "rectum", "salivarygland", "skeletalmuscle", 
+      "skin", "smallintestine", "smoothmuscle", "spleen", "stomach", 
+      "testis", "thyroid", "tonsil", "urinarybladder"))
+
+pdf('figures/ncorf_exp_heatmap_rna_human.pdf', width = 10, height = 5)
+m <- m4heat_rna(ncorf_human, fread(path_txp_human))
+colnames(m) <- snmap_rna_human[colnames(m)]
+pheatmap(
+    log(m + 1), show_rownames = FALSE,
+    color = colfun, name = 'Z score',
+    scale = 'row',
+    cluster_rows = FALSE, cluster_cols = FALSE,
+    raster_quality = 4
+)
+dev.off()
+
+pdf('figures/ncorf_exp_heatmap_rna_mouse.pdf', width = 10, height = 5)
+m <- m4heat_rna(ncorf_mouse, fread(path_txp_mouse))
+colnames(m) <- str_replace(colnames(m), '\\.', ' ')
+pheatmap(
+    log(m + 1), show_rownames = FALSE,
+    color = colfun, name = 'Z score',
+    scale = 'row',
+    cluster_rows = FALSE, cluster_cols = FALSE,
+    raster_quality = 4
+)
+dev.off()
+
+```
+
+
+### human WGCNA results
+WGCNA results
+```{r}
+# chromosome names and sizes
+chrom_human <- c(1:22, 'X', 'Y')
+gsize_human <- fread('data/human.genome.fa.fai', header = FALSE)
+gsize_human <- gsize_human[V1 %in% chrom_human, .(chrom = V1, start = 0, end = V2)]
+gsize_human[, chrom := factor(chrom, levels = chrom_human)]
+gsize_human <- gsize_human[order(chrom)]
+
+wgcna_human_raw <- fread('data/expression/human_wgcna_ncorf_cds_adjacency_tom.tsv.gz')
+wgcna_cutoff <- 0.1
+wgcna_human_raw <- wgcna_human_raw[tom > wgcna_cutoff & uid1 < uid2]  # 6073579
+
+# LSC ncORFs enrich ncORFs w/ links?
+x <- unique(c(wgcna_human_raw$uid1, wgcna_human_raw$uid2))
+table(str_detect(x, 'ENSG'))
+y <- x[str_detect(x, 'ENSG', negate = TRUE)]
+ncorf_cons[species == 'Human', table(uid %in% y, grp)]
+# "      grp
+#         Local BLS > 0.9 & PhyloCSF > 0 Other
+#   FALSE                            263  4545
+#   TRUE                             522  7139"
+fisher.test(ncorf_cons[species == 'Human', table(uid %in% y, grp)])  # 0.002749
+
+
+# wgcna_human <- wgcna_human[tom > wgcna_cutoff & adjacency > wgcna_cutoff & uid1 < uid2]  # 2286414
+wgcna_human <- wgcna_human_raw[order(-tom)][1:1000000]
+wgcna_human[txrep_hsa, chrom1 := i.chrom, on = .(uid1 = gene_id)]
+wgcna_human[ncorf_human, chrom1 := i.chrom, on = .(uid1 = uid)]
+
+wgcna_human[txrep_hsa, chrom2 := i.chrom, on = .(uid2 = gene_id)]
+wgcna_human[ncorf_human, chrom2 := i.chrom, on = .(uid2 = uid)]
+wgcna_human[, type1 := ifelse(str_starts(uid1, 'ENS'), 'CDS', 'ncORF')]
+wgcna_human[, type2 := ifelse(str_starts(uid2, 'ENS'), 'CDS', 'ncORF')]
+wgcna_human[, type := str_c(sort(unlist(.BY)), collapse = '-'), by = .(type1, type2)]
+wgcna_human[type1 == 'CDS' & type2 == 'ncORF', `:=`(
+    uid1 = uid2, uid2 = uid1, chrom2 = chrom1, chrom1 = chrom2, type1 = 'ncORF', type2 = 'CDS')]
+
+# pie chart of different interactions
+plt <- wgcna_human[, .(cnt = .N), by = .(type)]
+plt[, prop := cnt/sum(cnt)]
+plt <- plt[order(type, decreasing = TRUE)]
+plt
+#           type    cnt     prop
+#         <char>  <int>    <num>
+# 1: ncORF-ncORF  94566 0.094566
+# 2:   CDS-ncORF 197222 0.197222
+# 3:     CDS-CDS 708212 0.708212
+
+ggplot(plt, aes(x = '', y = prop, fill = type)) +
+    geom_col(width = 1) +
+    geom_text(aes(label = scales::percent(prop, accuracy = 0.01),
+                  y = cumsum(prop) - prop/2)) +
+    coord_polar('y', start = 0, direction = 1) +
+    scale_fill_discrete_c4a_cat('carto.safe', name = NULL) +
+    theme_void()
+ggsave('figures/human_ncORF_CDS_cotranslation_network_linkpie.pdf', width = 5, height = 3)    
+
+# ncORF-CDS co-translation network
+plt <- wgcna_human[, .(n = .N), by = .(chrom1, chrom2, type1, type2)]
+plt <- plt[chrom1 %in% chrom_human & chrom2 %in% chrom_human]
+
+plt <- plt[type1 == 'ncORF' & type2 == 'CDS']
+
+plt[, total1 := sum(n), by = .(chrom1)]
+plt[, total2 := sum(n), by = .(chrom2)]
+
+plt[, `:=`(p1 = n/total1, p2 = n/total2)]
+plt[, chrom1 := factor(chrom1, levels = chrom_human)]
+plt[, chrom2 := factor(chrom2, levels = chrom_human)]
+plt <- plt[order(chrom1, chrom2, type1, type2)]
+plt[gsize_human, size1 := i.end, on = .(chrom1 = chrom)]
+plt[gsize_human, size2 := i.end, on = .(chrom2 = chrom)]
+
+plt[, s1 := c(0, head(cumsum(p1), -1)) * size1, by = .(chrom1)]
+plt[, e1 := cumsum(p1) * size1, by = .(chrom1)]
+plt[, s2 := c(0, head(cumsum(p2), -1)) * size2, by = .(chrom2)]
+plt[, e2 := cumsum(p2) * size2, by = .(chrom2)]
+
+
+gsize_human2 <- rbind(gsize_human, gsize_human)
+gsize_human2[, chrom := str_c(chrom, rep(c('', '_'), each = 24))]
+chrom_human2 <- c(chrom_human, rev(str_c(chrom_human, '_')))
+gsize_human2[, chrom := factor(chrom, levels = chrom_human2)]
+gsize_human2 <- gsize_human2[order(chrom)]
+
+pdf('figures/human_ncORF_CDS_cotranslation_network.pdf', width = 5, height = 5)
+circos.clear()
+circos.initialize(gsize_human2$chrom, xlim = cbind(gsize_human2$start, gsize_human2$end))
+circos.track(gsize_human2$chrom, track.height = mm_h(0.01),
+             ylim = c(0, 1), cell.padding = c(0, 0, 0, 0), bg.lwd = 2)
+
+circos.track(ylim = c(0, 1), panel.fun = function(x, y) {
+    circos.text(CELL_META$xcenter, CELL_META$ylim[2] + mm_y(4), 
+                str_remove(CELL_META$sector.index, '_'), cex=0.8, niceFacing = TRUE)
+}, track.height = mm_h(1), cell.padding = c(0, 0, 0, 0), bg.border = NA)
+
+highlight.sector(chrom_human, col = "#5D69B1", track.index = 2) # ncORF
+highlight.sector(str_c(chrom_human, '_'), col = "#E58606", track.index = 2)  # CDS
+
+for(i in seq_len(nrow(plt))){
+    with(plt, circos.link(
+        sector.index1 = chrom1[i],
+        point1 = c(s1[i], e1[i]),
+        sector.index2 = str_c(chrom2[i], '_'),
+        point2 = c(s2[i], e2[i]),
+        col = alpha('black', 0.1),
+        h.ratio = 0.8
+    ))
+}
+dev.off()
+
+# co-translation between ncORF and CDS in the same gene? test with bootstrap
+plt <- wgcna_human[type1 == 'ncORF' & type2 == 'CDS']
+plt[ncorf_human, `:=`(gene_id = i.gene_id, gene_biotype = i.gene_biotype), on = .(uid1 = uid)]
+
+plt2 <- plt[gene_biotype == 'protein_coding']  # only meaningful for mRNAs
+plt2[uid2 == gene_id]  # 186
+fwrite(plt2[uid2 == gene_id], file = 'results/human_ncORF_mainCDS_cotranslation_pairs.tsv', sep = '\t')
+
+set.seed(2024)
+n_perm <- sapply(seq_len(1000), function(i){
+    sum(sample(plt2$uid2) == plt2$gene_id)
+})
+
+ggplot(data.table(x = n_perm), aes(x = x)) +
+    geom_histogram(binwidth = 5, fill = '#44AA99') +
+    geom_vline(xintercept = 186, linetype = 2, color = 'red') +
+    coord_cartesian(xlim = c(0, 200)) +
+    labs(x = 'Cotranslated ncORF-CDS pairs', y = 'Frequency')
+ggsave('figures/human_ncORF_mainCDS_cotranslation_permtest.pdf', width = 4, height = 3)
+
+# exclude ncORFs overlapping with any CDS
+plt2 <- plt2[!uid1 %in% cdsovlp_human$V4]
+plt2[uid2 == gene_id]  # 92
+
+set.seed(2024)
+n_perm2 <- sapply(seq_len(1000), function(i){
+    sum(sample(plt2$uid2) == plt2$gene_id)
+})
+
+ggplot(data.table(x = n_perm2), aes(x = x)) +
+    geom_histogram(binwidth = 2.5, fill = '#44AA99') +
+    geom_vline(xintercept = 92, linetype = 2, color = 'red') +
+    coord_cartesian(xlim = c(0, 100)) +
+    labs(x = 'Cotranslated ncORF-CDS pairs', y = 'Frequency')
+ggsave('figures/human_ncORF_mainCDS_cotranslation_permtest_NoOverlap.pdf', width = 4, height = 3)
+```
+
+### mouse WGCNA results
+```{r}
+# chromosome names and sizes
+chrom_mouse <- c(1:19, 'X', 'Y')
+gsize_mouse <- fread('data/mouse.genome.fa.fai', header = FALSE)
+gsize_mouse <- gsize_mouse[V1 %in% chrom_mouse, .(chrom = V1, start = 0, end = V2)]
+gsize_mouse[, chrom := factor(chrom, levels = chrom_mouse)]
+gsize_mouse <- gsize_mouse[order(chrom)]
+
+wgcna_mouse_raw <- fread('data/expression/mouse_wgcna_ncorf_cds_adjacency_tom.tsv.gz')
+wgcna_cutoff <- 0.1
+wgcna_mouse_raw <- wgcna_mouse_raw[tom > wgcna_cutoff & uid1 < uid2]  # 4365553
+
+x <- unique(c(wgcna_mouse_raw$uid1, wgcna_mouse_raw$uid2))
+table(str_detect(x, 'ENSG'))
+y <- x[str_detect(x, 'ENSG', negate = TRUE)]
+ncorf_cons[species == 'Mouse', table(uid %in% y, grp)]
+#        grp
+#         Local BLS > 0.9 & PhyloCSF > 0 Other
+#   FALSE                           1098 10436
+#   TRUE                             630  4796"
+fisher.test(ncorf_cons[species == 'Mouse', table(uid %in% y, grp)])   # 3.488e-05
+
+
+wgcna_mouse <- wgcna_mouse_raw[order(-tom)][1:1000000]
+wgcna_mouse[txrep_mmu, chrom1 := i.chrom, on = .(uid1 = gene_id)]
+wgcna_mouse[ncorf_mouse, chrom1 := i.chrom, on = .(uid1 = uid)]
+
+wgcna_mouse[txrep_mmu, chrom2 := i.chrom, on = .(uid2 = gene_id)]
+wgcna_mouse[ncorf_mouse, chrom2 := i.chrom, on = .(uid2 = uid)]
+wgcna_mouse[, type1 := ifelse(str_starts(uid1, 'ENS'), 'CDS', 'ncORF')]
+wgcna_mouse[, type2 := ifelse(str_starts(uid2, 'ENS'), 'CDS', 'ncORF')]
+wgcna_mouse[, type := str_c(sort(unlist(.BY)), collapse = '-'), by = .(type1, type2)]
+wgcna_mouse[type1 == 'CDS' & type2 == 'ncORF', `:=`(
+    uid1 = uid2, uid2 = uid1, chrom2 = chrom1, chrom1 = chrom2, type1 = 'ncORF', type2 = 'CDS')]
+
+# pie chart of different interactions
+plt <- wgcna_mouse[, .(cnt = .N), by = .(type)]
+plt[, prop := cnt/sum(cnt)]
+plt <- plt[order(type, decreasing = TRUE)]
+plt
+#           type    cnt     prop
+#         <char>  <int>    <num>
+# 1: ncORF-ncORF  46262 0.046262
+# 2:   CDS-ncORF 284283 0.284283
+# 3:     CDS-CDS 669455 0.669455
+
+ggplot(plt, aes(x = '', y = prop, fill = type)) +
+    geom_col(width = 1) +
+    geom_text(aes(label = scales::percent(prop, accuracy = 0.01),
+                  y = cumsum(prop) - prop/2)) +
+    coord_polar('y', start = 0, direction = 1) +
+    scale_fill_discrete_c4a_cat('carto.safe', name = NULL) +
+    theme_void()
+ggsave('figures/mouse_ncORF_CDS_cotranslation_network_linkpie.pdf', width = 5, height = 3)    
+
+# ncORF-CDS co-translation network
+plt <- wgcna_mouse[, .(n = .N), by = .(chrom1, chrom2, type1, type2)]
+plt <- plt[chrom1 %in% chrom_mouse & chrom2 %in% chrom_mouse]
+
+plt <- plt[type1 == 'ncORF' & type2 == 'CDS']
+
+plt[, total1 := sum(n), by = .(chrom1)]
+plt[, total2 := sum(n), by = .(chrom2)]
+
+plt[, `:=`(p1 = n/total1, p2 = n/total2)]
+plt[, chrom1 := factor(chrom1, levels = chrom_mouse)]
+plt[, chrom2 := factor(chrom2, levels = chrom_mouse)]
+plt <- plt[order(chrom1, chrom2, type1, type2)]
+plt[gsize_mouse, size1 := i.end, on = .(chrom1 = chrom)]
+plt[gsize_mouse, size2 := i.end, on = .(chrom2 = chrom)]
+
+plt[, s1 := c(0, head(cumsum(p1), -1)) * size1, by = .(chrom1)]
+plt[, e1 := cumsum(p1) * size1, by = .(chrom1)]
+plt[, s2 := c(0, head(cumsum(p2), -1)) * size2, by = .(chrom2)]
+plt[, e2 := cumsum(p2) * size2, by = .(chrom2)]
+
+
+gsize_mouse2 <- rbind(gsize_mouse, gsize_mouse)
+gsize_mouse2[, chrom := str_c(chrom, rep(c('', '_'), each = 21))]
+chrom_mouse2 <- c(chrom_mouse, rev(str_c(chrom_mouse, '_')))
+gsize_mouse2[, chrom := factor(chrom, levels = chrom_mouse2)]
+gsize_mouse2 <- gsize_mouse2[order(chrom)]
+
+pdf('figures/mouse_ncORF_CDS_cotranslation_network.pdf', width = 5, height = 5)
+circos.clear()
+circos.initialize(gsize_mouse2$chrom, xlim = cbind(gsize_mouse2$start, gsize_mouse2$end))
+circos.track(gsize_mouse2$chrom, track.height = mm_h(0.01),
+             ylim = c(0, 1), cell.padding = c(0, 0, 0, 0), bg.lwd = 2)
+
+circos.track(ylim = c(0, 1), panel.fun = function(x, y) {
+    circos.text(CELL_META$xcenter, CELL_META$ylim[2] + mm_y(4), 
+                str_remove(CELL_META$sector.index, '_'), cex=0.8, niceFacing = TRUE)
+}, track.height = mm_h(1), cell.padding = c(0, 0, 0, 0), bg.border = NA)
+
+highlight.sector(chrom_mouse, col = "#5D69B1", track.index = 2)
+highlight.sector(str_c(chrom_mouse, '_'), col = "#E58606", track.index = 2)
+
+for(i in seq_len(nrow(plt))){
+    with(plt, circos.link(
+        sector.index1 = chrom1[i],
+        point1 = c(s1[i], e1[i]),
+        sector.index2 = str_c(chrom2[i], '_'),
+        point2 = c(s2[i], e2[i]),
+        col = alpha('black', 0.1),
+        h.ratio = 0.8
+    ))
+}
+dev.off()
+
+# co-translation between ncORF and CDS in the same gene? test with bootstrap
+plt <- wgcna_mouse[type1 == 'ncORF' & type2 == 'CDS']
+plt[ncorf_mouse, `:=`(gene_id = i.gene_id, gene_biotype = i.gene_biotype), on = .(uid1 = uid)]
+
+plt2 <- plt[gene_biotype == 'protein_coding']  # only meaningful for mRNAs
+plt2[uid2 == gene_id]  # 360
+fwrite(plt2[uid2 == gene_id], file = 'results/mouse_ncORF_mainCDS_cotranslation_pairs.tsv', sep = '\t')
+
+set.seed(2024)
+n_perm <- sapply(seq_len(1000), function(i){
+    sum(sample(plt2$uid2) == plt2$gene_id)
+})
+
+ggplot(data.table(x = n_perm), aes(x = x)) +
+    geom_histogram(binwidth = 10, fill = '#44AA99') +
+    geom_vline(xintercept = 360, linetype = 2, color = 'red') +
+    coord_cartesian(xlim = c(0, 400)) +
+    labs(x = 'Cotranslated ncORF-CDS pairs', y = 'Frequency')
+ggsave('figures/mouse_ncORF_mainCDS_cotranslation_permtest.pdf', width = 4, height = 3)
+
+
+# exclude ncORFs overlapping with any CDS
+plt2 <- plt2[!uid1 %in% cdsovlp_mouse$V4]
+plt2[uid2 == gene_id]  # 123
+
+set.seed(2024)
+n_perm2 <- sapply(seq_len(1000), function(i){
+    sum(sample(plt2$uid2) == plt2$gene_id)
+})
+
+ggplot(data.table(x = n_perm2), aes(x = x)) +
+    geom_histogram(binwidth = 3.25, fill = '#44AA99') +
+    geom_vline(xintercept = 123, linetype = 2, color = 'red') +
+    coord_cartesian(xlim = c(0, 130)) +
+    labs(x = 'Cotranslated ncORF-CDS pairs', y = 'Frequency')
+ggsave('figures/mouse_ncORF_mainCDS_cotranslation_permtest_NoOverlap.pdf', width = 4, height = 3)
+```
+
+
+### Number of neighbors
+```{r}
+x <- table(c(wgcna_human_raw$uid1, wgcna_human_raw$uid2,
+             wgcna_mouse_raw$uid1, wgcna_mouse_raw$uid2))
+ncorf_cons[, links := 0L]
+ncorf_cons[uid %in% names(x), links := as.integer(x[uid])]
+
+tmp <- ncorf_cons[, .(total = .N, wlinks = sum(links > 0),
+                      prop = sum(links > 0)/.N), by = .(species, grp)]
+# "  species                            grp total wlinks      prop
+#     <char>                         <char> <int>  <int>     <num>
+# 1:   Human                          Other 11684   7139 0.6110065
+# 2:   Human Local BLS > 0.9 & PhyloCSF > 0   785    522 0.6649682
+# 3:   Mouse                          Other 15232   4796 0.3148634
+# 4:   Mouse Local BLS > 0.9 & PhyloCSF > 0  1728    630 0.3645833"
+tmp[, nolinks := total - wlinks]
+
+fisher.test(tmp[species == 'Human', .(wlinks, nolinks)])  # 0.002749
+fisher.test(tmp[species == 'Mouse', .(wlinks, nolinks)])  # 3.488e-05
+```
+
+## Expression quantification tables
+Quantification method
+- transcript: salmon
+- ncORF+CDS RNA: featureCounts
+- ncORF+CDS RPF: featureCounts
+
+transcription & translation in normal tissues
+- transcript：
+    - human：/nfs_data/changy/poj/ORF/human_riboseq/data_174/human_salmon_quant_32_tissues.tsv
+    - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_salmon_quant_29_tissues.tsv
+- ncORF+CDS RPF :
+    - human ncORF: /nfs_data/changy/poj/ORF/human_riboseq/data_174/human_RPF_ncorf_counts.tsv
+    - human CDS: /nfs_data/changy/poj/ORF/human_riboseq/data_174/human_RPF_cds_counts.tsv
+    - mouse ncORF: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_RPF_ncorf_counts.tsv
+    - mouse CDS: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_RPF_cds_counts.tsv
+
