@@ -553,6 +553,6 @@ p2 <- ggplot(plt[species == 'Mouse'], aes(x = label, y = log2R, fill = aacode)) 
 p1/p2
 ggsave('figures/ncorf_codon_rscu_vs_cds_bytype.pdf', width = 10, height = 10)
 
-fwrite(cft_ncorf, 'results/ncorf_codon_suage.tsv', sep = '\t')
-fwrite(cft_ncorf_type, 'results/ncorf_codon_suage_bytype.tsv', sep = '\t')
+fwrite(cft_ncorf, 'results/ncorf_codon_usage.tsv', sep = '\t')
+fwrite(cft_ncorf_type, 'results/ncorf_codon_usage_bytype.tsv', sep = '\t')
 ```
