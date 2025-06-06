@@ -4,6 +4,130 @@ editor: source
 editor_options: 
   chunk_output_type: console
 ---
+## Computation
+### Domains search with InterProScan
+```{bash}
+Interproscan/interproscan-5.64-96.0/interproscan.sh -i data/predict_output/human_three_methods_ncorf.pep.fa -f tsv -cpu 8 -t p
+Interproscan/interproscan-5.64-96.0/interproscan.sh -i data/predict_output/human_three_methods_ncorf.pep.fa -f tsv -cpu 8 -t p
+```
+
+### DeepLoc 2.0
+
+No server on GPU, load model to CPU as suggested
+```{python}
+# diff /home/admin/local/deeploc-2.0/deeploc2_package/DeepLoc2/model.py model.py.bak
+# 135,136c135,136
+
+# from
+self.subcel_clfs = [ESM1bFrozen.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/{i}_1Layer.ckpt")).eval() for i in range(5)]
+self.signaltype_clfs = [SignalTypeMLP.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/signaltype/{i}.ckpt")).eval() for i in range(5)]
+# to
+self.subcel_clfs = [ESM1bFrozen.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/{i}_1Layer.ckpt"), map_location=torch.device('cpu')).eval() for i in range(5)]
+self.signaltype_clfs = [SignalTypeMLP.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/signaltype/{i}.ckpt"), map_location=torch.device('cpu')).eval() for i in range(5)]
+```
+
+run prediction
+```{bash}
+# /nfs_data/zhangh/ncorf_mammals/data
+# copy model checkpoint links
+mkdir -p ~/.cache/torch/hub/
+cp -r /home/admin/.cache/torch/hub/checkpoints/ ~/.cache/torch/hub/
+
+# load deeploc2 pipenv
+bash
+source /home/admin/local/deeploc-2.0/.venv/bin/activate
+
+# run prediction
+deeploc2 -f human_three_methods_final_ncorfs.pep.fa -o deeploc2_human -m Fast
+deeploc2 -f mouse_three_methods_final_ncorfs.pep.fa -o deeploc2_mouse -m Fast
+
+# rename
+mv deeploc2_human/results_20231006-185307.csv human_three_methods_final_ncorfs.deeploc2.csv
+mv deeploc2_mouse/results_20231006-194907.csv mouse_three_methods_final_ncorfs.deeploc2.csv
+```
+
+
+### Intrinsically discordered regions (IDRs)
+## IUPred3 ncORFs
+```{bash}
+# human
+## split pep fasta single fa
+awk  '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../human_three_methods_ncorf.pep.fa
+## IUPred3
+for i in *.fa; do echo python /home/admin/local/iupred3/iupred3.py $i short -s no \>${i}_short.tsv; done >IUPred_human_ncorf_short.sh
+## summarise
+Rscript summarise_IUPred3_short.R human_IUPred_ncorf/ human_ncorf_sum_IUPred_short.tsv human_three_methods_ncorf.IUPred3short.tsv
+
+# mouse
+## split pep fasta single fa
+awk '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../mouse_three_methods_ncorf.pep.fa
+## IUPred3
+for i in *.fa; do echo python /home/admin/local/iupred3/iupred3.py $i short -s no \>${i}_short.tsv; done >IUPred_mouse_ncorf_short.sh
+## summarise
+Rscript summarise_IUPred3_short.R mouse_ncorf_fasta/ mouse_ncorf_sum_IUPred_short.tsv mouse_three_methods_ncorf.IUPred3short.tsv
+```
+
+## IUPred3 CDSs
+```{bash}
+# human
+## all CDS peptide sequence
+zcat /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.pep.all.fa.gz |sed 's/pep.*//g'|sed 's/\.*//g' >Homo_sapiens.GRCh38.pep.all.fa
+```
+
+```{r}
+##  R (extract peptide sequences of representative transcripts)
+pep <- readAAStringSet("Homo_sapiens.GRCh38.pep.all.fa")
+rep_pep <- read_tsv("/nfs_data/zhangh/ncorf_mammals/data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv")
+rep_fa <- pep[names(pep) %in% rep_pep$protein_id]
+writeXStringSet(rep_fa, "Homo_sapiens.GRCh38.107.txinfo.rep.pcg.fa")
+```
+
+```{bash}
+## split fasta
+awk  '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../Homo_sapiens.GRCh38.107.txinfo.rep.pcg.fa
+Rscript summarise_IUPred3_short.R human_IUPred_ncorf/ human_cds_sum_IUPred_short.tsv Homo_sapiens.GRCh38.107.txinfo.rep.pcg.IUPred3short.tsv.gz
+# mouse
+## all CDS peptide sequence
+zcat /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.pep.all.fa.gz |sed 's/pep*//g' |sed 's/\..*//g' >Mus_musculus.GRCm39.pep.all.fa
+```
+
+```{r}
+## R (extract representative transcripts peptide sequence)
+pep <- readAAStringSet("Mus_musculus.GRCm39.pep.all.fa")
+rep_pep <- read_tsv("/nfs_data/zhangh/ncorf_mammals/data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv")
+rep_fa <- pep[names(pep) %in% rep_pep$protein_id]
+writeXStringSet(rep_pep, "Mus_musculus.GRCm39.107.txinfo.rep.pcg.fa")
+```
+
+```{bash}
+## split fasta
+awk '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../Mus_musculus.GRCm39.107.txinfo.rep.pcg.fa
+Rscript summarise_IUPred3_short.R mouse_IUPred_ncorf/ mouse_cds_sum_IUPred_short.tsv Mus_musculus.GRCm39.107.txinfo.rep.pcg.IUPred3short.tsv.gz
+```
+
+### CDS overlapping ORFs
+find ORFs overlapping with CDSs, no matter which strand
+```{bash}
+# extract and merge CDS regions
+# pwd: /nfs_data/zhangh/ncorf_mammals/seqfeatures
+gppy convert2bed -g /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.107.gtf.gz -t cds >Homo_sapiens.GRCh38.107.cds.bed
+bedtools bed12tobed6 -i Homo_sapiens.GRCh38.107.cds.bed -n | bedtools sort | bedtools merge >Homo_sapiens.GRCh38.107.cds.merge.bed
+
+gppy convert2bed -g /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.107.gtf.gz -t cds >Mus_musculus.GRCm39.107.cds.bed
+bedtools bed12tobed6 -i Mus_musculus.GRCm39.107.cds.bed -n | bedtools sort | bedtools merge >Mus_musculus.GRCm39.107.cds.merge.bed
+
+# flag CDS-overlapping ORFs
+bedtools intersect -a ../data/human_three_methods_ncorf.bed -b Homo_sapiens.GRCh38.107.cds.merge.bed -split -c >../data/human_three_methods_ncorf.cds_overlap.tsv
+bedtools intersect -a ../data/mouse_three_methods_ncorf.bed -b Mus_musculus.GRCm39.107.cds.merge.bed -split -c >../data/mouse_three_methods_ncorf.cds_overlap.tsv
+```
+
+### TE overlapping ORFs
+```{bash}
+# /nfs_data/zhangh/ncorf_mammals/data
+bedtools bed12tobed6 -i mouse_three_methods_ncorf_chr.bed | bedtools intersect -wo -a - -b /nfs_data/database/ref_genomes/mouse_GRCm39/mm39_repeatmasker.bed >mouse_three_methods_ncorf.repeat_overlap.bed
+bedtools bed12tobed6 -i human_three_methods_ncorf_chr.bed | bedtools intersect -wo -a - -b /nfs_data/database/ref_genomes/human_GRCh38p13/hg38_repeatmasker.bed >human_three_methods_ncorf.repeat_overlap.bed
+```
+
 
 ## Analysis
 ```{r}
@@ -21,6 +145,7 @@ theme_set(theme_classic(base_size = 12) + theme(
     plot.subtitle = element_text(hjust = 0.5)))
 
 orflevels <- c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF')
+
 tofct_orflevels <- function(x, reverse = FALSE){
     x[x == 'lncRNA-ORF'] <- 'lncORF'
     if(reverse){
@@ -31,34 +156,32 @@ tofct_orflevels <- function(x, reverse = FALSE){
 }
 ```
 
-## CDS overlapping ORFs
-find ORFs overlapping with CDSs, no matter which strand
-```{bash}
-# extract and merge CDS regions
-# pwd: /nfs_data/zhangh/ncorf_mammals/seqfeatures
-gppy convert2bed -g /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.107.gtf.gz -t cds >Homo_sapiens.GRCh38.107.cds.bed
-bedtools bed12tobed6 -i Homo_sapiens.GRCh38.107.cds.bed -n | bedtools sort | bedtools merge >Homo_sapiens.GRCh38.107.cds.merge.bed
-
-gppy convert2bed -g /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.107.gtf.gz -t cds >Mus_musculus.GRCm39.107.cds.bed
-bedtools bed12tobed6 -i Mus_musculus.GRCm39.107.cds.bed -n | bedtools sort | bedtools merge >Mus_musculus.GRCm39.107.cds.merge.bed
-
-# flag CDS-overlapping ORFs
-bedtools intersect -a ../data/human_three_methods_ncorf.bed -b Homo_sapiens.GRCh38.107.cds.merge.bed -split -c >../data/human_three_methods_ncorf.cds_overlap.tsv
-bedtools intersect -a ../data/mouse_three_methods_ncorf.bed -b Mus_musculus.GRCm39.107.cds.merge.bed -split -c >../data/mouse_three_methods_ncorf.cds_overlap.tsv
-```
-
-## TE overlapping ORFs
-```{bash}
-# /nfs_data/zhangh/ncorf_mammals/data
-bedtools bed12tobed6 -i mouse_three_methods_ncorf_chr.bed | bedtools intersect -wo -a - -b /nfs_data/database/ref_genomes/mouse_GRCm39/mm39_repeatmasker.bed >mouse_three_methods_ncorf.repeat_overlap.bed
-bedtools bed12tobed6 -i human_three_methods_ncorf_chr.bed | bedtools intersect -wo -a - -b /nfs_data/database/ref_genomes/human_GRCh38p13/hg38_repeatmasker.bed >human_three_methods_ncorf.repeat_overlap.bed
-```
-
-## Prediction
 ### Domain
+Pfam entries and clans: https://pfam-docs.readthedocs.io/en/latest/summary.html
+
+About basic entries:
+- Family: Proteins share a common evolutionary origin, as reflected in their related functions, sequences or structure 
+- Domain: Distinct functional, structural or sequence units that may exist in a variety of biological contexts 
+- Repeats: Short sequences typically repeated within a protein 
+- Motifs: Short motifs such as metal binding 
+- Coiled-coil: Denoting characteristic heptad repeat 
+- Disordered: Conserved intrinsically disordered regions 
+
+About clan:
+> Structural properties are often more conserved than the underlying sequence. Therefore, a single profile HMM is often insufficient to model an entire, diverse, structural superfamily and related Pfam entries are sometimes grouped together into clans; the relationship may be defined by:
+> 
+>     - sequence similarity (whilst still originating from a common ancestor)
+>     - similarity of known three-dimensional structures
+>     - functional similarity
+>     - and/or similarity between their profile HMMs (as determined by algorithms such as HHsearch) similarity of sequence, structure or profile HMM.
+
+Metadata
+- https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/Pfam-A.clans.tsv.gz: A tab separated file containing Pfam-A family and clan information for all Pfam-A families;
+- https://ftp.ebi.ac.uk/pub/databases/Pfam/current_release/userman.txt: description of columns in flat files
+
 ```{r}
-ncorf_human <- fread('data/ncorf_annot/human_three_methods_ncorf.final.tsv')
-ncorf_mouse <- fread('data/ncorf_annot/mouse_three_methods_ncorf.final.tsv')
+ncorf_human <- fread('data/ncorf_v2412/human_three_methods_ncorf.final.meta.tsv')
+ncorf_mouse <- fread('data/ncorf_v2412/mouse_three_methods_ncorf.final.meta.tsv')
 
 # repeat overlapping ORFs
 rmsk_human <- fread('data/hg38_repeatmasker.tsv.gz')
@@ -72,6 +195,7 @@ ncorf_rmsk_human[rmsk_human, `:=`(repclass = i.repClass, repfamily = i.repFamily
 ncorf_rmsk_mouse[rmsk_mouse, `:=`(repclass = i.repClass, repfamily = i.repFamily), on = .(V10 = repName)]
 
 te_class <- c('DNA', 'LINE', 'LTR', 'Retroposon', 'SINE', 'Unknown')
+
 ncorf_rmsk_human <- ncorf_rmsk_human[repclass %in% te_class, .(
     replen = sum(V13), repclass = str_c(unique(repclass), collapse = ',')), by = .(uid = V4)]
 ncorf_rmsk_mouse <- ncorf_rmsk_mouse[repclass %in% te_class, .(
@@ -81,15 +205,8 @@ ncorf_human[, `:=`(replen = 0, repclass = NA_character_)]
 ncorf_human[ncorf_rmsk_human, `:=`(replen = i.replen, repclass = i.repclass), on = .(uid)]
 ncorf_mouse[, `:=`(replen = 0, repclass = NA_character_)]
 ncorf_mouse[ncorf_rmsk_mouse, `:=`(replen = i.replen, repclass = i.repclass), on = .(uid)]
-```
 
 # InterProScan
-```{bash}
-Interproscan/interproscan-5.64-96.0/interproscan.sh -i data/predict_output/human_three_methods_ncorf.pep.fa -f tsv -cpu 8 -t p
-Interproscan/interproscan-5.64-96.0/interproscan.sh -i data/predict_output/human_three_methods_ncorf.pep.fa -f tsv -cpu 8 -t p
-```
-
-```{r}
 pfam_clan <- fread('data/Pfam-A.clans.tsv.gz', header = FALSE)
 setnames(pfam_clan, c('signature_acc', 'clan_acc', 'clan_id', 'clan_pfam', 'clan_desp'))
 pfam_clan[clan_id == '', `:=`(clan_acc = clan_desp, clan_id = clan_desp)]
@@ -123,15 +240,15 @@ table(ips_mouse$analysis)
 
 # protein domain is mostly covered in Pfam
 tmp_db <- 'Pfam'
-ips_human[analysis == tmp_db][, uniqueN(uid)]  # 329/12469 = 0.02638544
-ips_mouse[analysis == tmp_db][, uniqueN(uid)]  # 196/16960 = 0.0115566
+ips_human[analysis == tmp_db][, uniqueN(uid)]  # 150/11623 = 0.01290545
+ips_mouse[analysis == tmp_db][, uniqueN(uid)]  # 129/16485 = 0.007825296
 
 tmp <- tibble::tribble(
     ~ species, ~ type, ~n,
-    'Human', 'No Pfam domain', 12140,
-    'Human', 'w/ Pfam domain', 329,
-    'Mouse', 'No Pfam domain', 16764,
-    'Mouse', 'w/ Pfam domain', 196
+    'Human', 'No Pfam domain', 11623 - 150,
+    'Human', 'w/ Pfam domain', 150,
+    'Mouse', 'No Pfam domain', 16485 - 129,
+    'Mouse', 'w/ Pfam domain', 129
 )
 setDT(tmp)
 tmp[, prop := n/sum(n), by = .(species)]
@@ -147,7 +264,15 @@ ggplot(tmp, aes(x = '', y = prop, fill = type)) +
     theme_void()
 ggsave('figures/ncorf_prop_with_pfam_domain_piechart.pdf', width = 3, height = 6)
 
+# export table
+tmp <- rbind(Human = ips_human[analysis == 'Pfam'], Mouse = ips_mouse[analysis == 'Pfam'], idcol = 'species')
+tmp <- tmp[, .(species, orf_id = uid, orf_type, te_overlap = replen > 0, te_class = repclass,
+               pfam_clan_acc = clan_acc, pfam_clan_id = clan_id, pfam_clan_desp = clan_desp)]
+tmp <- unique(tmp)[order(species, orf_id)]
+tmp[duplicated(orf_id), orf_id := NA_character_]
+writexl::write_xlsx(tmp, 'results/Table_ncORFs_with_pfam_domains.xlsx')
 
+# plot the most abundant domains
 tmp1 <- ips_human[analysis == 'Pfam'][, .(N = uniqueN(uid)), by = .(clan_id, clan_acc, clan_despu)][order(-N)]
 tmp2 <- ips_mouse[analysis == 'Pfam'][, .(N = uniqueN(uid)), by = .(clan_id, clan_acc, clan_despu)][order(-N)]
 ips_pfam_summary <- rbind(Human = tmp1, Mouse = tmp2, idcol = 'species')
@@ -158,13 +283,16 @@ tmp <- ips_pfam_summary[, sum(N), by = .(clan_id, clan_acc, clan_despu)][order(-
 # seach example: https://www.ebi.ac.uk/interpro/set/pfam/CL0063/
 claninfo <- tibble::tribble(
     ~ clan_acc, ~ clan_info,
-    'CL0361', 'Zinc finger, C2H2 type',
+    'CL0361', 'C2H2 Zinc finger',
     'KRAB box', 'KRAB box',
-    'CL0020', 'Tetratricopeptide-like repeat',
-    'CL0159', 'Ig-like fold',
-    'CL0063', 'Rossmann-fold, NAD+ binding',
-    'CL0123', 'Helix-turn-helix, DNA binding'
+    'CL0159', 'Cadherin domain',
+    'CL0063', 'Rossmann-fold',
+    'CL0123', 'Helix-turn-helix',
+    'CL0343', 'MHC',
+    'ENV polyprotein (coat polyprotein)', 'ENV polyprotein',
+    'CL0020', '14-3-3 protein'
 )
+
 claninfo <- as.data.table(claninfo)
 ips_pfam_summary[claninfo, clan_info := i.clan_info, on = .(clan_acc)]
 
@@ -173,7 +301,7 @@ plt[, clan_info := factor(clan_info, levels = rev(claninfo$clan_info))]
 
 ggplot(plt, aes(x = N, y = clan_info, fill = species)) +
     geom_col() +
-    scale_fill_brewer(palette = 'Set1') +
+    scale_fill_brewer(palette = 'Accent', direction = -1) +
     labs(x = 'Number of ncORFs', y = NULL, fill = NULL) +
     theme(legend.position = c(0.95, 0.05),
           legend.justification = c(1, 0)) +
@@ -188,19 +316,11 @@ ncorf_pfam_mouse <- ips_mouse[analysis == 'Pfam', .(
 ncorf_human[ncorf_pfam_human, pfam := i.signatures, on = .(uid)]
 ncorf_mouse[ncorf_pfam_mouse, pfam := i.signatures, on = .(uid)]
 
-ncorf_human[, fisher.test(table(!is.na(pfam), replen > 0))]  # p-value = 6.439e-06
+ncorf_human[, fisher.test(table(!is.na(pfam), replen > 0))]  # p-value = 0.0005806
 ncorf_human[, addmargins(table(!is.na(pfam), replen > 0))]
-#         FALSE  TRUE   Sum
-#   FALSE 10941  1199 12140
-#   TRUE    269    60   329
-#   Sum   11210  1259 12469
 
-ncorf_mouse[, fisher.test(table(!is.na(pfam), replen > 0))]  # p-value = 1.605e-13
+ncorf_mouse[, fisher.test(table(!is.na(pfam), replen > 0))]  # p-value = 3.409042e-17
 ncorf_mouse[, addmargins(table(!is.na(pfam), replen > 0))]
-#         FALSE  TRUE   Sum
-#   FALSE 15182  1582 16764
-#   TRUE    141    55   196
-#   Sum   15323  1637 16960
 
 plt <- rbind(
     Human = ncorf_human[!is.na(pfam), .N, by = .(orf_type, te = ifelse(replen > 0, 'TE-overlapping', 'Non-ovelapping'))],
@@ -218,100 +338,68 @@ ggplot(plt, aes(y = orf_type, x = N, fill = te)) +
 ggsave('figures/ncorf_pfam_TE_derived_prop.pdf', width = 6, height = 3)
     
 
-plt <- rbind(Human = ncorf_human, Mouse = ncorf_mouse, idcol = 'species')
+plt <- rbind(Human = ncorf_human, Mouse = ncorf_mouse, idcol = 'species', fill = TRUE)
 plt[, grp := ifelse(is.na(pfam), 'Without Pfam domains', 'With Pfam domains')]
 plt[, orf_type := factor(orf_type, levels = orflevels)]
+plt[, grp_type := forcats::fct_collapse(orf_type, lncORF = 'lncORF', other_level = 'Other')]
 
-plt2 <- plt[, .(
-    p = wilcox.test(orf_len[grp == 'Without Pfam domains'], orf_len[grp == 'With Pfam domains'])$p.value
-), keyby = .(species, orf_type)]
+ggplot(plt[!is.na(pfam)], aes(x = grp_type, fill = species)) +
+    geom_bar(position = position_dodge(width = 0.8), width = 0.75) +
+    geom_text(stat = 'count', aes(label = after_stat(count)),
+              position = position_dodge(width = 0.8), width = 0.75, vjust = -0.5) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    scale_fill_brewer(palette = 'Accent', direction = -1) +
+    labs(x = NULL, y = 'Number of ORFs', fill = NULL) +
+    theme(legend.position = 'inside',
+          legend.position.inside = c(0.98, 0.98),
+          legend.justification = c(1, 1))
+ggsave('figures/ncorf_pfam_count_by_type.pdf', width = 4, height = 3)
+
+plt2 <- plt[, .N, by = .(species, grp, te = replen > 0)]
+plt2[, prop := N/sum(N), by = .(species, grp)]
+
+num_percent <- function(x, p){
+    str_c(scales::number(x, big.mark = ','), '\n(', scales::percent(p, accuracy = 0.1), ')')
+}
+
+ggplot(plt2, aes(y = grp, x = N, fill = te)) +
+    geom_col(position = 'fill', width = 0.85) +
+    geom_text(aes(label = num_percent(N, prop)),
+              position = position_fill(vjust = .5)) +
+    scale_fill_manual(values = c('#A6CEE3', '#B2DF8A'),
+                      breaks = c(T, F), labels = c('TE-overlapping', 'Other')) +
+    scale_x_continuous(labels = scales::percent,
+                       expand = expand_scale(mult = c(0, 0.05))) +
+    facet_grid(rows = vars(species)) +
+    labs(y = NULL, x = 'Proportion of ORFs', fill = NULL) +
+    theme(legend.position = 'bottom')
+ggsave('figures/ncorf_pfam_TE_derived_prop.pdf', width = 4, height = 3)
+
+plt2 <- plt[, .(p = wilcox.test(
+    orf_len[grp == 'Without Pfam domains'],
+    orf_len[grp == 'With Pfam domains'])$p.value), keyby = .(species)]
 plt2[, p2 := scales::scientific(p, digits = 2, prefix='italic(P)==')]
-"   species orf_type            p
- 1:   Human   lncORF 5.561032e-67
- 2:   Human     uORF 2.341843e-30
- 3:   Human    uoORF 4.218671e-10
- 4:   Human     iORF 9.852631e-04
- 5:   Human    doORF 4.376884e-04
- 6:   Human     dORF 4.716927e-09
- 7:   Mouse   lncORF 1.186818e-64
- 8:   Mouse     uORF 4.481900e-13
- 9:   Mouse    uoORF 2.434672e-05
-10:   Mouse     iORF 3.775865e-03
-11:   Mouse    doORF 8.229540e-03
-12:   Mouse     dORF 2.902790e-12"
+
+#    species            p                 p2
+#     <char>        <num>             <char>
+# 1:   Human 6.508578e-75 italic(P)==6.5e-75
+# 2:   Mouse 8.139349e-73 italic(P)==8.1e-73
 
 ggplot(plt, aes(x = orf_len/3 - 1)) +
     geom_density(aes(fill = grp), position = 'identity', alpha = 0.6) +
-    geom_text(data = plt2, aes(x = 20, y = Inf, label = p2), vjust = 1, parse = TRUE) +
-    facet_grid(vars(orf_type), vars(species)) +
+    geom_text(data = plt2,
+              aes(x = 100, y = Inf, label = p2), vjust = 1, parse = TRUE) +
+    facet_wrap(vars(species), scales = 'free_y') +
     scale_fill_discrete_c4a_cat('carto.safe') +
     scale_x_log10(breaks=c(10, 100, 1000)) +
     labs(x = 'ORF length (AA)', y = 'Density', fill = NULL) +
-    theme(axis.text.y = element_blank(),
-          strip.text.y = element_text(angle = 0),
-          legend.position = 'bottom')
-ggsave('figures/ncorf_pfam_vs_orflen.pdf', width = 8, height = 6)
+    theme(strip.text.y = element_text(angle = 0),
+          legend.position = 'bottom',
+          legend.justification.bottom = 1)
+ggsave('figures/ncorf_pfam_vs_orflen.pdf', width = 6, height = 4)
 ```
 
 ### Intrinsically discordered regions (IDRs)
-## IUPred3 ncORFs
-```{bash}
-# human
-## split pep fasta single fa
-awk  '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../human_three_methods_ncorf.pep.fa
-## IUPred3
-for i in *.fa; do echo python /home/admin/local/iupred3/iupred3.py $i short -s no \>${i}_short.tsv; done >IUPred_human_ncorf_short.sh
-## summarise
-Rscript summarise_IUPred3_short.R human_IUPred_ncorf/ human_ncorf_sum_IUPred_short.tsv human_three_methods_ncorf.IUPred3short.tsv
-
-# mouse
-## split pep fasta single fa
-awk '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../mouse_three_methods_ncorf.pep.fa
-## IUPred3
-for i in *.fa; do echo python /home/admin/local/iupred3/iupred3.py $i short -s no \>${i}_short.tsv; done >IUPred_mouse_ncorf_short.sh
-## summarise
-Rscript summarise_IUPred3_short.R mouse_ncorf_fasta/ mouse_ncorf_sum_IUPred_short.tsv mouse_three_methods_ncorf.IUPred3short.tsv
-```
-
-## IUPred3 CDSs
-```{bash}
-# human
-## all CDS peptide sequence
-zcat /nfs_data/database/ref_genomes/human_GRCh38p13/ens107/Homo_sapiens.GRCh38.pep.all.fa.gz |sed 's/pep.*//g'|sed 's/\.*//g' >Homo_sapiens.GRCh38.pep.all.fa
-```
-
-```{r}
-##  R (extract representative transcripts peptide sequence)
-pep <- readAAStringSet("Homo_sapiens.GRCh38.pep.all.fa")
-rep_pep <- read_tsv("/nfs_data/zhangh/ncorf_mammals/data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv")
-rep_fa <- pep[names(pep) %in% rep_pep$protein_id]
-writeXStringSet(rep_fa, "Homo_sapiens.GRCh38.107.txinfo.rep.pcg.fa")
-```
-
-```{bash}
-## split fasta
-awk  '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../Homo_sapiens.GRCh38.107.txinfo.rep.pcg.fa
-Rscript summarise_IUPred3_short.R human_IUPred_ncorf/ human_cds_sum_IUPred_short.tsv Homo_sapiens.GRCh38.107.txinfo.rep.pcg.IUPred3short.tsv.gz
-# mouse
-## all CDS peptide sequence
-zcat /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.pep.all.fa.gz |sed 's/pep*//g' |sed 's/\..*//g' >Mus_musculus.GRCm39.pep.all.fa
-```
-
-```{r}
-## R (extract representative transcripts peptide sequence)
-pep <- readAAStringSet("Mus_musculus.GRCm39.pep.all.fa")
-rep_pep <- read_tsv("/nfs_data/zhangh/ncorf_mammals/data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv")
-rep_fa <- pep[names(pep) %in% rep_pep$protein_id]
-writeXStringSet(rep_pep, "Mus_musculus.GRCm39.107.txinfo.rep.pcg.fa")
-```
-
-```{bash}
-## split fasta
-awk '/^>/{if(x){close(x)}; x=substr($0,2)".fa"; print >x;next}{print >> x}' ../Mus_musculus.GRCm39.107.txinfo.rep.pcg.fa
-Rscript summarise_IUPred3_short.R mouse_IUPred_ncorf/ mouse_cds_sum_IUPred_short.tsv Mus_musculus.GRCm39.107.txinfo.rep.pcg.IUPred3short.tsv.gz
-```
-
-
 ```{r}
 parse_iupred <- function(path){
     iupred <- fread(path, header = TRUE)
@@ -366,58 +454,24 @@ median_ci <- function(x, nboot=1000, alpha=0.05){
     return(list(median = med, lower = ci[1], upper = ci[2]))
 }
 
-
+set.seed(2024)
 tmp <- plt[, median_ci(frac), by = .(type, species)]
-# https://stats.stackexchange.com/questions/99829/how-to-obtain-a-confidence-interval-for-a-percentile/284970
+# as per https://stats.stackexchange.com/questions/99829/how-to-obtain-a-confidence-interval-for-a-percentile/284970
 tmp[, med_se := (upper - lower)/2]
-#      type species    median     lower     upper      med_se
-#    <char>  <char>     <num>     <num>     <num>       <num>
-# 1:  ncORF   Human 0.6000000 0.5849057 0.6153846 0.015239478
-# 2:  ncORF   Mouse 0.5882353 0.5769231 0.6051094 0.014093166
-# 3:    CDS   Human 0.1459459 0.1437126 0.1488779 0.002582662
-# 4:    CDS   Mouse 0.1272727 0.1247848 0.1296296 0.002422435
-```
 
-### DeepLoc 2.0
-No GPU on our server, load model to CPU as suggested. The original deeploc2 scripts were modified as follows.
-```{python}
-# diff /home/admin/local/deeploc-2.0/deeploc2_package/DeepLoc2/model.py model.py.bak
-# 135,136c135,136
 
-# from
-self.subcel_clfs = [ESM1bFrozen.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/{i}_1Layer.ckpt")).eval() for i in range(5)]
-self.signaltype_clfs = [SignalTypeMLP.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/signaltype/{i}.ckpt")).eval() for i in range(5)]
-# to
-self.subcel_clfs = [ESM1bFrozen.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/{i}_1Layer.ckpt"), map_location=torch.device('cpu')).eval() for i in range(5)]
-self.signaltype_clfs = [SignalTypeMLP.load_from_checkpoint(pkg_resources.resource_filename(__name__,f"models/models_esm1b/signaltype/{i}.ckpt"), map_location=torch.device('cpu')).eval() for i in range(5)]
-```
+se <- function(x) {sd(x)/sqrt(length(x))}
+plt[, .(mean = mean(frac), sem = se(frac)), by = .(type, species)]
 
-run prediction
-```{bash}
-# /nfs_data/zhangh/ncorf_mammals/data
-# copy model checkpoint links
-mkdir -p ~/.cache/torch/hub/
-cp -r /home/admin/.cache/torch/hub/checkpoints/ ~/.cache/torch/hub/
-
-# load deeploc2 pipenv
-bash
-source /home/admin/local/deeploc-2.0/.venv/bin/activate
-
-# run prediction
-deeploc2 -f human_three_methods_final_ncorfs.pep.fa -o deeploc2_human -m Fast
-deeploc2 -f mouse_three_methods_final_ncorfs.pep.fa -o deeploc2_mouse -m Fast
-
-# rename
-mv deeploc2_human/results_20231006-185307.csv human_three_methods_ncorfs.deeploc2.csv
-mv deeploc2_mouse/results_20231006-194907.csv mouse_three_methods_ncorfs.deeploc2.csv
 ```
 
 ### Subcellular localization
 ```{r}
 parse_deeploc2 <- function(path){
     deeploc2 <- fread(path)
-    deeploc2[, Mitochondrion := pmax(Mitochondrion, Plastid)]
-    deeploc2[, c('Plastid', 'Localizations') := NULL]
+    # deeploc2[, Mitochondrion := pmax(Mitochondrion, Plastid)]
+    # deeploc2[, c('Plastid', 'Localizations') := NULL]
+    deeploc2[, c('Localizations') := NULL]
     setnames(deeploc2, c('Protein_ID', 'Signals', 'Lysosome/Vacuole'),
              c('uid', 'signals', 'Lysosome'))
     deeploc2 <- melt(
@@ -434,10 +488,10 @@ deeploc2_mouse <- parse_deeploc2('data/ncorf_annot/mouse_three_methods_ncorf.dee
 deeploc2_mouse <- deeploc2_mouse[uid %in% ncorf_mouse$uid]
 uniqueN(deeploc2_mouse$uid) == nrow(ncorf_mouse)
 
-fwrite(deeploc2_human, 'results/ncorf_deeploc2_human_processe.tsv', sep='\t')
-fwrite(deeploc2_mouse, 'results/ncorf_deeploc2_mouse_processe.tsv', sep='\t')
+fwrite(deeploc2_human, 'results/ncorf_deeploc2_human_processed.tsv', sep='\t')
+fwrite(deeploc2_mouse, 'results/ncorf_deeploc2_mouse_processed.tsv', sep='\t')
 
-DEEPLOC2_P <- 0.65
+DEEPLOC2_P <- 0.5
 locstat_human <- deeploc2_human[, .(
     max_prob = max(prob), max_loc = location[which.max(prob)],
     locs_num = sum(prob > DEEPLOC2_P), locs = str_c(location[prob > DEEPLOC2_P], collapse = ',')
@@ -454,35 +508,37 @@ locstat_mouse[, table(locs_num)]
 locstat_mouse <- merge(locstat_mouse, ncorf_mouse[, .(uid, orf_type, orf_len)], by = 'uid')
 
 locstat <- rbind(Human = locstat_human, Mouse = locstat_mouse, idcol = 'species')
-plt <- locstat[, .(all = .N, confident = sum(max_prob > DEEPLOC2_P)), .(species, orf_type, max_loc)]
-plt[, orf_type := tofct_orflevels(orf_type, reverse = TRUE)]
+locstat[, max_loc2 := max_loc]
+locstat[max_loc2 %in% c('Cell membrane', 'Endoplasmic reticulum', 'Golgi apparatus',
+                        'Lysosome', 'Plastid', 'Peroxisome'), max_loc2 := 'Other']
+locstat[max_prob < 0.5, max_loc2 := 'Ambiguous']
 
-ggplot(plt, aes(y = orf_type, x = all, fill = max_loc)) +
+plt <- locstat[, .(all = .N, confident = sum(max_prob > DEEPLOC2_P)), .(species, orf_type, max_loc2)]
+plt[, orf_type := tofct_orflevels(orf_type, reverse = TRUE)]
+plt[, max_loc2 := forcats::fct_relevel(factor(max_loc2), 'Ambiguous', after = Inf)]
+
+ggplot(plt, aes(y = orf_type, x = all, fill = max_loc2)) +
     geom_col(position = 'fill') +
-    scale_fill_discrete_c4a_cat('carto.safe') +
+    scale_fill_discrete_c4a_cat('brewer.set2') +
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) +
     facet_wrap(vars(species)) +
-    labs(x = 'Fraction', y = NULL, fill = NULL) +
-    theme(panel.spacing.x = unit(0.8, 'lines'))
+    labs(x = 'Fraction of ORFs', y = NULL, fill = NULL) +
+    theme(panel.spacing.x = unit(2, 'lines'))
 ggsave('figures/deeploc2_maxProbLoc_summary_all.pdf', width = 7, height = 3)
 
-ggplot(plt, aes(y = orf_type, x = confident, fill = max_loc)) +
-    geom_col(position = 'fill') +
-    scale_fill_discrete_c4a_cat('carto.safe') +
-    facet_wrap(vars(species)) +
-    labs(x = 'Fraction', y = NULL, fill = NULL) +
-    theme(panel.spacing.x = unit(0.8, 'lines'))
-ggsave('figures/deeploc2_maxProbLoc_summary_confident.pdf', width = 7, height = 3)
 
 locstat[, .(total = .N, conf = sum(locs_num > 0)), by = .(species)]
-#    species total conf
-# 1:   Human 12469 1930
-# 2:   Mouse 16960 2358
+#    species total  conf
+#     <char> <int> <int>
+# 1:   Human 11623  9698
+# 2:   Mouse 16485 13392
 
 plt2 <- plt[, lapply(.SD, sum), by = .(species, orf_type), .SDcols = c('all', 'confident')]
 ggplot(plt2, aes(y = orf_type, x = confident/all)) +
     geom_col() +
     facet_wrap(vars(species), scales = 'free_x') +
-    labs(x = 'Fraction of ORFs w/ confident localizaiton (P > 0.65)', y = NULL, fill = NULL) +
+    labs(x = 'Fraction of ORFs w/ confident localizaiton (P > 0.5)', y = NULL, fill = NULL) +
     theme(panel.spacing.x = unit(0.8, 'lines'))
 ggsave('figures/deeploc2_maxProbLoc_summary_confident_prop.pdf', width = 6, height = 3)
 
@@ -490,21 +546,174 @@ tmp <- copy(locstat)
 tmp[, orf_type := tofct_orflevels(orf_type)]
 ggplot(tmp, aes(x = max_prob)) +
     geom_density(fill = 'grey') +
+    geom_vline(xintercept = 0.5, linetype = 2, color = 'red') +
     facet_grid(vars(orf_type), vars(species)) +
     labs(x = 'Maximum Probability of subcellular localizaitons', y = 'Density', fill = NULL) +
     theme(panel.spacing.x = unit(0.8, 'lines'))
 ggsave('figures/deeploc2_maxProbLoc_summary_maxp.pdf', width = 6, height = 5)
 
+# less accurate for short ORFs?
+ggplot(locstat, aes(x = orf_len/3 - 1, y = max_prob)) +
+    geom_point() +
+    scale_x_log10()
+
+ggplot(locstat, aes(x = orf_len/3 - 1, fill = max_loc2 == 'Ambiguous')) +
+    geom_density(position = 'identity', alpha = 0.6) +
+    scale_fill_discrete_c4a_cat(
+        'brewer.set1', breaks = c(T, F),
+        labels = c('Ambiguous', 'Remaining ORFs')) +
+    scale_x_log10() +
+    facet_wrap(vars(species)) +
+    labs(x = 'ORF length (AA)', y = 'Density', fill = NULL) +
+    theme(legend.position = 'inside',
+          legend.position.inside = c(0.98, 0.98),
+          legend.justification = c(1, 1))
+ggsave('figures/deeploc2_ambiguous_lendist.pdf', width = 6, height = 3)
 ```
 
-## Datasets
-- Domains: InterProScan
-    - human: /nfs_data/changy/poj/ORF/human_riboseq/data_174/human_ncorf_interproscan.tsv
-    - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_ncorf_interproscan.tsv
-- IDR: IUPred3
-    - human: /nfs_data/changy/poj/ORF/human_riboseq/data_174/human_ncorf_final_IUPred3_short.tsv
-    - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_ncorf_final_IUPred3_short.tsv
-- Localization: DeepLoc 2.0
-    - using webserver: https://services.healthtech.dtu.dk/services/DeepLoc-2.0/
-    - human: /nfs_data/changy/poj/ORF/human_riboseq/data_174/human_three_methods_ncorf.deeploc2.tsv
-    - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/data_209/mouse_three_methods_ncorf.deeploc2.tsv
+#### ProtGPS results
+```{r}
+compartments <- as.data.table(tibble::tribble(
+    ~gps, ~dl2,
+    "Cajal_body", "Nucleus",
+    "Cell_junction", "Cytoplasm", 
+    "Chromatin", "Nucleus",
+    "Nuclear_pore_complex", "Nucleus",
+    "Nuclear_speckle", "Nucleus",
+    "Nucleolus", "Nucleus",
+    "P-body", "Cytoplasm", 
+    "PML-body", "Nucleus",
+    "Post_synaptic_density", "Cytoplasm", 
+    "Stress_granule", "Cytoplasm", 
+    "Transcriptional_condensate", "Nucleus"))
+
+gps_human <- fread('data/ncorf_v2412/ProtGPS_ncORF_human.csv.gz')
+gps_mouse <- fread('data/ncorf_v2412/ProtGPS_ncORF_mouse.csv.gz')
+gps_all <- rbind(Human = gps_human, Mouse = gps_mouse, idcol = 'species')
+gps_all[, seq := NULL]
+setnames(gps_all, 'id', 'uid')
+
+gps_all <- melt(gps_all, id.vars = c('species', 'uid'), variable.name = 'loc', value.name = 'p')
+gps_all[, loc := str_remove(str_to_sentence(loc), '_score$')]
+gps_stat <- gps_all[, .(
+    gps_maxp = max(p),
+    gps_nloc = sum(p > 0.5),
+    gps_maxl = loc[which.max(p)]
+), by = .(species, uid)]
+
+gps_stat[, gps_maxl2 := ifelse(gps_maxp > 0.5, gps_maxl, 'Ambiguous')]
+gps_stat[gps_maxl2 == 'Pml-bdoy', gps_maxl2 := 'PML body']
+gps_stat[gps_maxl2 == 'Chromosome', gps_maxl2 := 'Chromatin']
+gps_stat[gps_maxl2 == 'Transcriptional', gps_maxl2 := 'Transcriptional_condensate']
+
+gps_stat[ncorf_human, orf_type := i.orf_type, on = .(uid)]
+gps_stat[ncorf_mouse, orf_type := i.orf_type, on = .(uid)]
+gps_stat[compartments, gps_dl2 := i.dl2, on = .(gps_maxl = gps)]
+
+ggplot(gps_stat, aes(y = orf_type, fill = gps_maxl)) +
+    geom_bar(position = 'fill') +
+    facet_wrap(vars(species)) +
+    scale_fill_discrete_c4a_cat('cols4all.friendly11')
+
+# final location stat
+floc_stat <- merge(gps_stat, locstat[, .(
+    species, uid, dl2_maxp = max_prob, dl2_nloc = locs_num, dl2_maxl = max_loc, dl2_maxl2 = max_loc2)],
+    by = c('species', 'uid'))
+
+# for ncORFs located in nucleus
+plt <- floc_stat[dl2_maxl2 == 'Nucleus']
+plt[gps_maxl2 %in% compartments$gps[compartments$dl2 == 'Cytoplasm'],
+    gps_maxl2 := 'Cytoplasmic condensates']
+plt[, gps_maxl2 := str_replace_all(gps_maxl2, '_', ' ')]
+
+ggplot(plt, aes(y = gps_maxl2)) +
+    geom_bar(aes(fill = gps_maxl2), show.legend = FALSE) +
+    geom_text(stat = 'count', aes(
+        label = after_stat(count), hjust = 0.5 - (-1)^(after_stat(count) > 1000) )) +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.05))) +
+    scale_fill_discrete_c4a_cat('cols4all.friendly9') +
+    facet_wrap(vars(species), drop = TRUE) +
+    labs(x = 'Number of ORFs', y = NULL, fill = NULL)
+ggsave('figures/protgps_for_ncorfs_in_nucleus.pdf', width = 8, height = 4)
+
+# -----------------------------draft---------------------------------------
+# general overview
+plt <- as.data.table(floc_stat[, table(gps_maxl, dl2_maxl)])
+ggplot(plt, aes(x = gps_maxl, y = dl2_maxl, fill = N)) +
+    geom_tile() +
+    scale_fill_viridis_c(trans = 'log1p') +
+    theme(axis.text.x = element_text(vjust = 0.5, hjust = 1, angle = 90))
+
+plt[, prop := N/sum(N), by = .(dl2_maxl)]
+plt[, prop2 := N/sum(N), by = .(gps_maxl)]
+
+ggplot(plt, aes(x = gps_maxl, y = dl2_maxl, fill = prop)) +
+    geom_tile() +
+    scale_fill_viridis_c() +
+    theme(axis.text.x = element_text(vjust = 0.5, hjust = 1, angle = 90))
+
+ggplot(plt, aes(x = gps_maxl, y = dl2_maxl, fill = prop2)) +
+    geom_tile() +
+    scale_fill_viridis_c() +
+    theme(axis.text.x = element_text(vjust = 0.5, hjust = 1, angle = 90))
+
+
+ggplot(floc_stat[dl2_maxl == gps_dl2], aes(x = gps_maxl, y = dl2_maxl)) +
+    geom_bin_2d() +
+    scale_fill_viridis_c(trans = 'log1p') +
+    theme(axis.text.x = element_text(vjust = 0.5, hjust = 1, angle = 90))
+
+# calculate an enrichment matrix?
+m <- dcast(floc_stat[species == 'Human'], gps_maxl ~ dl2_maxl, fun.aggregate = length)
+m2 <- as.matrix(m[, -1])
+rownames(m2) <- m$gps_maxl
+dim(m2)
+m3 <- sum(m2) * outer(rowSums(m2)/sum(m2), colSums(m2)/sum(m2))
+m4 <- log2((m2 + 1)/(m3 + 1))
+
+tmp <- as.data.table(m4, keep.rownames = 'gps_maxl')
+tmp <- melt(tmp, id.vars = 'gps_maxl',variable.name = 'dl2_maxl', value.name = 'log2fc')
+
+ggplot(tmp, aes(x = gps_maxl, y = dl2_maxl, fill = log2fc)) +
+    geom_tile() +
+    scale_fill_gradient2(high = 'red', low = 'blue') +
+    theme(axis.text.x = element_text(vjust = 0.5, hjust = 1, angle = 90))
+```
+
+#### SignalP results
+```{r}
+signalp <- rbind(
+    Human = fread('data/ncorf_annot/human_three_methods_ncorf.signalp.gff3', skip = 1),
+    Mouse = fread('data/ncorf_annot/mouse_three_methods_ncorf.signalp.gff3', skip = 1), idcol = 'species')
+signalp[, V3 := str_replace(V3, '-', '_')]
+signalp[, range := str_c(V4, V5, sep = '-')]
+setnames(signalp, c('V1'), c('uid'))
+signalp <- dcast(signalp, species + uid ~ V3, value.var = 'range')
+
+floc_stat[, sig_pep := uid %in% signalp$uid]
+
+plt <- floc_stat[, .N, keyby = .(species, dl2_maxl2, sig_pep)]
+plt[, prop := N/sum(N) * 100, by = .(species, dl2_maxl2)]
+plt[, dl2_maxl2 := forcats::fct_relevel(factor(dl2_maxl2), c('Other', 'Ambiguous'), after = Inf)]
+plt[, dl2_maxl2 := forcats::fct_rev(dl2_maxl2)]
+
+ggplot(plt[sig_pep == TRUE], aes(y = dl2_maxl2, x = N, fill = dl2_maxl2)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_discrete_c4a_cat('brewer.set2', reverse = TRUE) +
+    facet_wrap(vars(species), scales = 'free_x') +
+    labs(x = 'ORFs with signal peptides', y = NULL)
+ggsave('figures/signalp_for_ncorfs_in_extracellular.pdf', width = 4, height = 3)
+
+floc_stat[, table(species, sig_pep)]
+#       sig_pep
+# species FALSE  TRUE
+#   Human 11573    50
+#   Mouse 16406    79
+
+
+# export table
+fwrite(floc_stat, 'results/ncorf_subcellular_localization_summary.tsv.gz', sep = '\t', compress = 'auto')
+tmp <- copy(floc_stat)
+tmp[, gps_maxl3 := ifelse(dl2_maxl2 == 'Nucleus', gps_maxl2, '-')]
+writexl::write_xlsx(tmp, 'results/Table_ncorf_subcellular_localization_summary.xlsx')
+```

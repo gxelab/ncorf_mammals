@@ -35,10 +35,11 @@ bedtools bed12tobed6 -i human_three_methods_ncorf.bed | bedtools sort |
     >human_three_methods_ncorf.czs.bed
 ```
 
-## gnocchi score
+### gnocchi score analysis
 ```{r}
 library(data.table)
 library(ggplot2)
+library(stringr)
 library(cols4all)
 
 theme_set(theme_classic(base_size = 12) + theme(
@@ -48,6 +49,8 @@ theme_set(theme_classic(base_size = 12) + theme(
     plot.title = element_text(hjust = 0.5),
     plot.subtitle = element_text(hjust = 0.5)))
 
+ncorf_human <- fread('data/ncorf_v2412/human_three_methods_ncorf.final.meta.tsv')
+
 # orfs
 czs <- fread('data/variation/human_three_methods_ncorf.czs.bed', header = FALSE)
 czs[, V10 := as.numeric(V10)]
@@ -55,6 +58,7 @@ czs_orf <- czs[V11 > 0, .(len_covered = sum(V12), mean_czs = sum(V10 * V12/sum(V
 
 czs_orf_all <- unique(czs[, .(orf_id = V4)])
 czs_orf_all <- czs_orf[czs_orf_all, on = .(orf_id)]
+czs_orf_all <- czs_orf_all[orf_id %in% ncorf_human$uid]
 fwrite(czs_orf_all, 'data/variation/human_three_methods_ncorf.czs.tsv', sep = '\t')
 
 # cds
@@ -68,13 +72,13 @@ fwrite(czs_orf_all, 'data/variation/human_three_methods_final_ncorfs.czs.tsv', s
 
 
 # compare
-ncorfs_cdsovlp <- fread('data/ncorf_annot/human_three_methods_ncorf.cds_overlap.tsv', header = FALSE)
-ncorfs_cdsovlp <- ncorfs_cdsovlp[V13 > 0]
 txrep_hsa_pcg <- fread('data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv')
 
 plt <- rbindlist(list(
-    ncORF = czs_orf_all[!is.na(mean_czs) & !orf_id %in% ncorfs_cdsovlp$V4, .(id = orf_id, gnocchi = mean_czs)],
-    CDS = czs_cds_all[!is.na(mean_czs) & tx_name %in% txrep_hsa_pcg$tx_name, .(id = tx_name, gnocchi = mean_czs)]
+    ncORF = czs_orf_all[!is.na(mean_czs) & !orf_id %in% ncorf_human[cds_ovlp == T]$uid,
+                        .(id = orf_id, gnocchi = mean_czs)],
+    CDS = czs_cds_all[!is.na(mean_czs) & tx_name %in% txrep_hsa_pcg$tx_name,
+                      .(id = tx_name, gnocchi = mean_czs)]
 ), idcol = 'type')
 
 ggplot(plt, aes(x = gnocchi, fill = type)) +
@@ -83,14 +87,15 @@ ggplot(plt, aes(x = gnocchi, fill = type)) +
     labs(x = 'Gnocchi score', y = 'Count', fill = NULL) +
     scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
     scale_fill_discrete_c4a_cat('carto.vivid') +
-    theme(legend.position = c(0.02, 0.98),
+    theme(legend.position = 'inside',
+          legend.position.inside = c(0.02, 0.98),
           legend.justification = c(0, 1))
 ggsave('figures/ncorf_cds_gnocchi_comparison.pdf', width = 4, height = 3)
 
 ggplot(plt, aes(x = gnocchi, fill = type)) +
     geom_density(position = 'identity', alpha = 0.618) +
     geom_vline(xintercept = 0, linetype = 2) +
-    labs(x = 'Gnocchi score', y = 'Count', fill = NULL) +
+    labs(x = 'Gnocchi score', y = 'Density', fill = NULL) +
     scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
     scale_fill_discrete_c4a_cat('carto.vivid') +
     theme(legend.position = c(0.02, 0.98),
@@ -101,35 +106,19 @@ ggsave('figures/ncorf_cds_gnocchi_comparison_density.pdf', width = 4, height = 3
 t.test(plt[type == 'CDS', gnocchi], mu = 0, alternative = 'greater')$p.value  # 0
 t.test(plt[type == 'ncORF', gnocchi], mu = 0, alternative = 'greater')$p.value # 0
 plt[, .(mean = mean(gnocchi), median = median(gnocchi), prop = sum(gnocchi > 0)/.N), by = .(type)]
-#     type     mean   median      prop
-# 1: ncORF 1.331047 1.382157 0.7689735
-# 2:   CDS 1.873174 1.862607 0.8856956
+#      type     mean   median      prop
+#    <char>    <num>    <num>     <num>
+# 1:  ncORF 1.335820 1.391872 0.7691505
+# 2:    CDS 1.873174 1.862607 0.8856956
 ```
 
-# datasets (mammals or primates)
 ## PhyloP
 prepare:
 - get intervals that are expanded by 30bp at both 5' end and 3' end with `bed12_slop.py`;
 - extract per-base phylop with `bigwig_covpn_dna.py`;
 - summarize in R;
 
-```{bash}
-# ncORFs
-python /nfs_data/zhangh/tmp/bed12_slop.py -i ../data/human_three_methods_final_ncorfs.bed -l -30 -r -30 -o human_three_methods_final_ncorfs_30bp.bed
-sed 's/^/chr/g' human_three_methods_final_ncorfs_30bp.bed >human_three_methods_final_ncorfs_30bp_chr.bed
-
-python bigwig_covpn_dna.py hg38.phyloP447way_primate.bw human_three_methods_final_ncorfs_30bp_chr.bed >hg38.primate_phylop_ncorf.tsv
-python bigwig_covpn_dna.py hg38.phyloP447way_mammals.bw human_three_methods_final_ncorfs_30bp_chr.bed >hg38.mammals_phylop_ncorf.tsv
-
-# CDSs
-gppy convert2bed -g ../Homo_sapiens.GRCh38.107.gtf -t cds -e 30 >Homo_sapiens.GRCh38.107.bed
-sed 's/^/chr/g' Homo_sapiens.GRCh38.107.cds.bed >Homo_sapiens.GRCh38.107.cds_chr.bed
-
-python bigwig_covpn_dna.py hg38.phyloP447way_primate.bw Homo_sapiens.GRCh38.107.cds_chr.bed >Homo_sapiens.GRCh38.107.primate_phylop_cds.tsv
-python bigwig_covpn_dna.py hg38.phyloP447way_mammals.bw Homo_sapiens.GRCh38.107.cds.30bp.chr.bed >Homo_sapiens.GRCh38.107.mammals_phylop_cds.tsv
-```
-
-compress phyloP data on disk.
+comparess phyloP data on disk.
 ```{bash}
 # /nfs_data/zhangh/ncorf_mammals/evolution
 # copied from the following locations
@@ -138,6 +127,13 @@ cp /nfs_data/changy/poj/ORF/human_riboseq/phylop/hg38.phyloP447way.mammals.ncorf
 /nfs_data/changy/poj/ORF/human_riboseq/phylop/hg38.phyloP447way.primate.ncorf.tsv.gz \
 /nfs_data/changy/poj/ORF/human_riboseq/phylop/hg38.phyloP447way.primate.cds.tsv.gz .
 ```
+## phyloCSF
+  - human：/nfs_data/changy/poj/ORF/human_riboseq/evolution_174/human_phyloCSF_ncorf.txt
+  - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/evolution_209/mouse_phyloCSF_ncorf.txt
+
+## BLS
+  - human：/nfs_data/changy/poj/ORF/human_riboseq/evolution_174/human_bls_ncorf.txt
+  - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/evolution_209/mouse_bls_ncorf.txt
 
 ```{r}
 library(data.table)
@@ -155,24 +151,20 @@ theme_set(theme_classic(base_size = 12) + theme(
 
 check name collisions between human and mouse ncORFs
 ```{r}
-ncorfs_human <- fread('data/ncorf_annot/human_three_methods_ncorf.final.tsv')
-ncorfs_human[, orf_id := uid]
+ncorf_human <- fread('data/ncorf_v2412/human_three_methods_ncorf.final.meta.tsv')
+ncorf_mouse <- fread('data/ncorf_v2412/mouse_three_methods_ncorf.final.meta.tsv')
+ncorf_human[, orf_id := uid]
+ncorf_mouse[, orf_id := uid]
 
-ncorfs_mouse <- fread('data/ncorf_annot/mouse_three_methods_ncorf.final.tsv')
-ncorfs_mouse[, orf_id := uid]
-
-intersect(ncorfs_human$orf_id, ncorfs_mouse$orf_id)
+intersect(ncorf_human$orf_id, ncorf_mouse$orf_id)
 # character(0) -> empty. we can safely combine files from the two species
-
-# human ncORFs overlapping with CDS
-ncorfs_cdsovlp <- fread('data/ncorf_annot/human_three_methods_ncorf.cds_overlap.tsv', header = FALSE)
-ncorfs_cdsovlp <- ncorfs_cdsovlp[V13 > 0]
 
 # representative transcripts in human
 txrep_hsa_pcg <- fread('data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv')
 ```
 
-## PhyloP
+
+# PhyloP
 ```{r}
 nt_cutoff <- 30
 
@@ -200,19 +192,17 @@ stop_phylop <- function(tab){
 }
 
 phylop_mammals_ncorfs <- read_phylop('data/evolution/hg38.phyloP447way.mammals.ncorf.tsv.gz')
-phylop_mammals_ncorfs <- phylop_mammals_ncorfs[!id %in% ncorfs_cdsovlp$V4]
+phylop_mammals_ncorfs <- phylop_mammals_ncorfs[id %in% ncorf_human$uid]
+phylop_mammals_ncorfs <- phylop_mammals_ncorfs[!id %in% ncorf_human[cds_ovlp == T]$orf_id]
 
 phylop_primates_ncorfs <- read_phylop('data/evolution/hg38.phyloP447way.primate.ncorf.tsv.gz')
-phylop_primates_ncorfs <- phylop_primates_ncorfs[!id %in% ncorfs_cdsovlp$V4]
-
+phylop_primates_ncorfs <- phylop_primates_ncorfs[id %in% ncorf_human$uid]
+phylop_primates_ncorfs <- phylop_primates_ncorfs[!id %in% ncorf_human[cds_ovlp == T]$orf_id]
 
 start_mammals_ncorfs <- start_phylop(phylop_mammals_ncorfs)
 start_primates_ncorfs <- start_phylop(phylop_primates_ncorfs)
 stop_mammals_ncorfs <- stop_phylop(phylop_mammals_ncorfs)
 stop_primates_ncorfs <- stop_phylop(phylop_primates_ncorfs)
-
-# plot(colMeans(start_mammals_ncorfs), type = 'h')
-# plot(apply(start_mammals_ncorfs, 2, median), type = 'h')
 
 ptab_ncorfs <- rbindlist(list(
     start_Mammals = data.table(
@@ -248,14 +238,10 @@ phylop_mammals_cds <- phylop_mammals_cds[id %in% txrep_hsa_pcg$tx_name]
 phylop_primates_cds <- read_phylop('data/evolution/hg38.phyloP447way.primate.cds.tsv.gz')
 phylop_primates_cds <- phylop_primates_cds[id %in% txrep_hsa_pcg$tx_name]
 
-
 start_mammals_cds <- start_phylop(phylop_mammals_cds)
 start_primates_cds <- start_phylop(phylop_primates_cds)
 stop_mammals_cds <- stop_phylop(phylop_mammals_cds)
 stop_primates_cds <- stop_phylop(phylop_primates_cds)
-
-# plot(colMeans(start_mammals_cds), type = 'h')
-# plot(apply(start_mammals_cds, 2, median), type = 'h')
 
 ptab_cds <- rbindlist(list(
     start_Mammals = data.table(
@@ -288,19 +274,6 @@ ptab <- rbind(CDS = ptab_cds, ncORF = ptab_ncorfs, idcol = 'type')
 ptab[, c('region', 'taxa') := tstrsplit(region, '_')]
 ptab <- ptab[, .(region, taxa, type, posn, mean, median, group)]
 
-ggplot(ptab[region == 'start'], aes(x = posn, y = mean, fill = group)) +
-    geom_col(show.legend = FALSE, width = 0.618) +
-    facet_wrap(vars(taxa, type), scales = 'free', ncol = 1,
-               labeller = label_wrap_gen(multi_line = FALSE)) +
-    scale_fill_brewer(palette = 'Set1')
-ggsave('figures/phylop_447way_start_mean.pdf', width = 12, height = 8)
-
-ggplot(ptab[region == 'stop'], aes(x = posn, y = mean, fill = group)) +
-    geom_col(show.legend = FALSE, width = 0.618) +
-    facet_wrap(vars(taxa, type), scales = 'free', ncol = 1,
-               labeller = label_wrap_gen(multi_line = FALSE)) +
-    scale_fill_brewer(palette = 'Set1')
-ggsave('figures/phylop_447way_stop_mean.pdf', width = 12, height = 8)
 
 ggplot(ptab[taxa == 'Mammals'], aes(x = posn, y = mean, fill = factor(seq_along(group) %% 3))) +
     geom_col(show.legend = FALSE, width = 0.618) +
@@ -342,94 +315,18 @@ ptab_actest <- rbind(start = ptab_actest_start, stop = ptab_actest_stop, idcol =
 ptab_actest
 fwrite(ptab_actest, 'results/phylop_autocorrelation_test_30nt.tsv', sep='\t')
 
+
 rm(phylop_mammals_cds, phylop_primates_cds, phylop_mammals_ncorfs, phylop_primates_ncorfs)
 ```
 
-## ncORF origin
-- view correspondance between node number and label: `View(as_tibble(tree_human))`
+# conservation scores
 origin node infer methods
 - naive: the most recent common ancestor of leaves with ORFs
 - origin: based on ancestral sequence reconstruction. The most distant human ancestor between human
           and which all intermediate nodes have intact ORFs.
 
-### reconstructed ancestral sequence
-```{bash}
-## human
-# get fasta
-python3 ~admin/scripts/maf_getfasta.py /nfs_data/database/hg38_100way/maf hg38 ../data_174/human_three_methods_ncorf_chr.bed output.maf 2>maf_getfasta.log
-python ~admin/scripts/maf_splitfa.py output.maf maf_block/
-# filter length
-for i in maf_block/*; do j=$(basename $i); echo Rscript filter_seq_length.R $i mafft_block/${j%%.fa}.filter.fa; done >01_filter_length.sh
-# mafft
-for i in mafft_block/*.filter.fa; do j=$(basename $i); echo mafft-linsi $i \>mafft_block/${j%%.fa}.mafft.fa; done>02_mafft.sh
-for i in mafft_block/*.mafft.fa; do j=$(basename $i); echo mkdir reconstruction_asr/${j%%.filter.mafft.fa}; done>03_mkdir_mafft.sh
-for i in mafft_block/*.mafft.fa; do j=$(basename $i); echo mv $i reconstruction_asr/${j%%.filter.mafft.fa};done >04_mv_mafft.sh
-# gotree
-for i in reconstruction_asr/*/*.mafft.fa; do echo "grep '>' $i >${i%%.mafft.fa}_tips.txt"; done >05_get_tips.sh
-for i in reconstruction_asr/*/*_tips.txt; do echo "sed 's/>//g' $i > ${i%%_tips.txt}_tips_no.txt"; done > 06_remove_tips.sh
-for i in reconstruction_asr/*/*tips_no.txt; do echo gotree prune -i /nfs_data/database/hg38_100way/hg38.100way.nh -r true -f $i -o ${i%%_tips_no.txt}.nwk; done >07_gotree.sh
-# fastml (SubMatrix HKY/JC_Nuc --OptimizeBL no --indelReconstruction ML)
-for i in reconstruction_asr/*/*.mafft.fa; do echo perl /home/admin/local/FastML.v3.11/www/fastml/FastML_Wrapper.pl --MSA_file $i --Tree ${i%%.filter.mafft.fa}.nwk --seqType nuc --SubMatrix HKY --OptimizeBL no --indelReconstruction ML --outDir /nfs_data/changy/poj/ORF/human_riboseq/evolution/${i%/*.filter.mafft.fa}; done >08_fastml.sh
-for i in tmp/*; do j=$(basename $i); echo perl /home/admin/local/FastML.v3.11/www/fastml/FastML_Wrapper.pl --MSA_file reconstruction_asr/$j/$j*.mafft.fa --Tree reconstruction_asr/$j/$j.nwk --seqType nuc --SubMatrix JC_Nuc --OptimizeBL no --indelReconstruction ML --outDir /nfs_data/changy/poj/ORF/human_riboseq/evolution_174/reconstruction_asr/$j; done >08_fastml_jcnuc.sh
-for i in reconstruction_asr/*/*.mafft.fa; do echo mv ${i%/*.mafft.fa}/tree.newick.txt ${i%%.filter.mafft.fa}.tree.newick.txt ;done >09_mv_nwk.sh
-for i in tmp/*; do j=$(basename $i); echo mv reconstruction_asr/$j/tree.newick.txt reconstruction_asr/$j/$j.tree.newick.txt ;done >09_mv_nwk_jcnuc.sh
-for i in reconstruction_asr/*/*.mafft.fa; do echo mv ${i%/*.mafft.fa}/seq.marginal_IndelAndChars.txt ${i%%.filter.mafft.fa}.seq.marginal_IndelAndChars.txt ;done >10_mv_seq.sh
-sed 's/_IndelAndChars//g' 10_mv_seq.failed.sh >10_mv_seq_noindel.sh
-
-## mouse
-# maf index
-for i in *.maf; do echo python /home/admin/scripts/maf_index.py $i mm39.${i%%.maf} ;done > 00_index_maf.sh
-# get fasta
-python3 ~admin/scripts/maf_getfasta.py /nfs_data/database/mm39_35way/maf mm39 ../data_209/mouse_three_methods_ncorf_chr.bed output.maf 2>maf_getfasta.log
-python ~admin/scripts/maf_splitfa.py output.maf maf_block/
-# filter length
-for i in maf_block/*; do j=$(basename $i); echo Rscript filter_seq_length.R $i mafft_block/${j%%.fa}.filter.fa; done >01_filter_length.sh
-# mafft
-for i in mafft_block/*.filter.fa; do j=$(basename $i); echo mafft-linsi $i \>mafft_block/${j%%.fa}.mafft.fa; done>02_mafft.sh
-for i in mafft_block/*.mafft.fa; do j=$(basename $i); echo mkdir reconstruction_asr/${j%%.filter.mafft.fa}; done>03_mkdir_mafft.sh
-for i in mafft_block/*.mafft.fa; do j=$(basename $i); echo mv $i reconstruction_asr/${j%%.filter.mafft.fa};done >04_mv_mafft.sh
-# gotree (GCF_003668045 == CriGri)
-for i in reconstruction_asr/*/*.mafft.fa; do echo "grep '>' $i >${i%%.mafft.fa}_tips.txt"; done >05_get_tips.sh
-for i in reconstruction_asr/*/*_tips.txt; do echo "sed 's/>//g' $i > ${i%%_tips.txt}_tips_no.txt"; done > 06_remove_tips.sh
-for i in reconstruction_asr/*/*tips_no.txt; do echo gotree prune -i mm39.35way.nh -r true -f $i -o ${i%%_tips_no.txt}.nwk; done >07_gotree.sh
-# fastml
-for i in reconstruction_asr/*/*.mafft.fa; do echo perl /home/admin/local/FastML.v3.11/www/fastml/FastML_Wrapper.pl --MSA_file $i --Tree ${i%%.filter.mafft.fa}.nwk --seqType nuc --SubMatrix HKY --OptimizeBL no --indelReconstruction ML --outDir /nfs_data/changy/poj/ORF/mouse_riboseq/evolution_209/${i%/*.filter.mafft.fa}; done >08_fastml.sh
-for i in tmp/*; do j=$(basename $i); echo perl /home/admin/local/FastML.v3.11/www/fastml/FastML_Wrapper.pl --MSA_file reconstruction_asr/$j/$j*.mafft.fa --Tree reconstruction_asr/$j/$j.nwk --seqType nuc --SubMatrix JC_Nuc --OptimizeBL no --indelReconstruction ML --outDir /nfs_data/changy/poj/ORF/mouse_riboseq/evolution_209/reconstruction_asr/$j; done >08_fastml_jcnuc.sh
-for i in reconstruction_asr/*/*.mafft.fa; do echo mv ${i%/*.mafft.fa}/tree.newick.txt ${i%%.filter.mafft.fa}.tree.newick.txt ;done >09_mv_nwk.sh
-for i in tmp/*; do j=$(basename $i); echo mv reconstruction_asr/$j/tree.newick.txt reconstruction_asr/$j/$j.tree.newick.txt ;done >09_mv_nwk_jcnuc.sh
-for i in reconstruction_asr/*/*.mafft.fa; do echo mv ${i%/*.mafft.fa}/seq.marginal_IndelAndChars.txt ${i%%.filter.mafft.fa}.seq.marginal_IndelAndChars.txt ;done >10_mv_seq.sh
-sed 's/_IndelAndChars//g' 10_mv_seq.failed.sh >10_mv_seq_noindel.sh
-```
-
-## BLS
-  - human：/nfs_data/changy/poj/ORF/human_riboseq/evolution_174/human_bls_ncorf.txt
-  - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/evolution_209/mouse_bls_ncorf.txt
-  
-```{bash}
-# human
-for i in reconstruction_asr/*/*seq.marginal_IndelAndChars.txt; do j=$(basename $i); echo python ~zhangh/tmp/bls/orf_bls.py $i ${i%%.seq.marginal_IndelAndChars.txt}.tree.newick.txt hg38.100way.nh hg38 -o bls_result/${j%%.seq.marginal_IndelAndChars.txt}; done >11_human_bls.sh
-for i in human_noindels/*; do j=$(basename $i); echo python ~zhangh/tmp/bls/orf_bls.py reconstruction_asr/$j/$j.seq.marginal.txt reconstruction_asr/$j/$j.tree.newick.txt hg38.100way.nh hg38 -o bls_result/$j; done >11_human_bls_noindels.sh
-
-# mouse
-for i in reconstruction_asr/*/*seq.marginal_IndelAndChars.txt; do j=$(basename $i); echo python ~zhangh/tmp/bls/orf_bls.py $i ${i%%.seq.marginal_IndelAndChars.txt}.tree.newick.txt mm39.35way.root.nh mm39 -o bls_result/${j%%.seq.marginal_IndelAndChars.txt}; done >11_mouse_bls.sh
-for i in mouse_noindels/*; do j=$(basename $i); echo python ~zhangh/tmp/bls/orf_bls.py reconstruction_asr/$j/$j.seq.marginal.txt reconstruction_asr/$j/$j.tree.newick.txt mm39.35way.root.nh mm39 -o bls_result/$j; done >11_mouse_bls_noindels.sh
-```
-
 ## BLS
 ```{r}
-# merge bls
-files_human <- list.files('evolution_174/bls_result/', pattern = 'result.txt' , full.names = T)
-names(files_human) <- sub('bls_result/.*', '', basename(files_human))
-sum_data_human <- bind_rows(lapply(files_human, read.table), .id = 'id') %>%   
-  mutate(id = gsub('\\.result.txt', '', id))
-write_tsv(sum_data_human, "human_bls_result.txt")
-
-files_mouse <- list.files('evolution_174/bls_result/', pattern = 'result.txt' , full.names = T)
-names(files_mouse) <- sub('bls_result/.*', '', basename(files_mouse))
-sum_data_mouse <- bind_rows(lapply(files_mouse, read.table), .id = 'id') %>%   
-  mutate(id = gsub('\\.result.txt', '', id))
-write_tsv(sum_data, "mouse_bls_result.txt")
-
 read_bls <- function(path){
     bls <- fread(path)
     bls <- bls[, seq_len(ncol(bls)) %% 2 == 1, with = FALSE]
@@ -442,9 +339,9 @@ read_bls <- function(path){
 }
 
 bls_human <- read_bls('data/evolution/human_bls_ncorf.txt')
-bls_human <- bls_human[uid %in% ncorfs_human$uid]
+bls_human <- bls_human[uid %in% ncorf_human$uid]
 # some human specific ncORFs have no orthologs in other species
-bls_human <- merge(ncorfs_human[, .(uid)], bls_human, all.x = TRUE)
+bls_human <- merge(ncorf_human[, .(uid)], bls_human, all.x = TRUE)
 bls_human[is.na(origin_manner), `:=`(
     origin_manner = 'nondenovo', origin_age = 'hg38', origin_age_global = 'hg38',
     bl_all = 18.46038, bl_sub_origin = 0, bl_orf_origin = 0, bls_global_origin = 0,
@@ -452,8 +349,8 @@ bls_human[is.na(origin_manner), `:=`(
     bl_orf_naive = 0, bls_global_naive = 0, bls_local_naive = 0)]
 
 bls_mouse <- read_bls('data/evolution/mouse_bls_ncorf.txt')
-bls_mouse <- bls_mouse[uid %in% ncorfs_mouse$uid]
-bls_mouse <- merge(ncorfs_mouse[, .(uid)], bls_mouse, all.x = TRUE)
+bls_mouse <- bls_mouse[uid %in% ncorf_mouse$uid]
+bls_mouse <- merge(ncorf_mouse[, .(uid)], bls_mouse, all.x = TRUE)
 bls_mouse[is.na(origin_manner), `:=`(
     origin_manner = 'nondenovo', origin_age = 'mm39', origin_age_global = 'mm39',
     bl_all = 8.778538, bl_sub_origin = 0, bl_orf_origin = 0, bls_global_origin = 0,
@@ -494,6 +391,145 @@ ggplot(plt2, aes(x = bls, fill = tree)) +
 ggsave('figures/ncORF_BLS_ASR_histogram.pdf', width = 7, height = 3)
 ```
 
+## PhyloCSF
+```{r}
+read_phylocsf <- function(path){
+    scores <- fread(path)
+    scores <- scores[, .(uid = id, method = seq, orf_len = end,
+                         phylocsf = phylocsf.score, codon_bls = bls.score)]
+    scores[, method := ifelse(method == 'naive', 'MRCA', 'ASR')]
+    return(scores)
+}
+
+phylocsf_human <- read_phylocsf('data/evolution/human_phyloCSF_ncorf.txt')
+phylocsf_human <- phylocsf_human[uid %in% ncorf_human$uid]
+
+phylocsf_mouse <- read_phylocsf('data/evolution/mouse_phyloCSF_ncorf.txt')
+phylocsf_mouse <- phylocsf_mouse[uid %in% ncorf_mouse$uid]
+
+
+# combine conservation scores: BLS & PhyloCSF
+ncorfs_cons <- melt(
+    ncorfs_bls,
+    id.vars = c('species', 'uid', 'origin_manner'),
+    measure.vars = c(
+        'bls_global_origin', 'bls_local_origin',
+        'bls_global_naive', 'bls_local_naive'),
+    value.name = 'bls')
+ncorfs_cons[, c('tree', 'method') := tstrsplit(variable, '_')[2:3]]
+ncorfs_cons[, variable := NULL]
+setnames(ncorfs_cons, 'origin_manner', 'origin')
+ncorfs_cons <- dcast(ncorfs_cons, species + uid + origin + method ~ tree, value.var = 'bls')
+setnames(ncorfs_cons, c('global', 'local'), c('bls_global', 'bls_local'))
+ncorfs_cons[, method := ifelse(method == 'naive', 'MRCA', 'ASR')]  # all ncORFs are included
+
+ncorfs_cons <- merge(ncorfs_cons, rbind(Human = phylocsf_human, Mouse = phylocsf_mouse, idcol='species'),
+      by = c('species', 'uid', 'method'), all.x = TRUE)
+ncorfs_cons[, phylocsf_pc := phylocsf/(orf_len/3)]  # get PhyloCSF per codon
+
+p1 <- ggplot(ncorfs_cons[species == 'Human' & method == 'ASR'], aes(x = phylocsf_pc)) +
+    geom_density(position = 'identity', show.legend = FALSE, fill = '#8DD3C7') +
+    geom_vline(xintercept = 0, linetype = 2) +
+    coord_cartesian(xlim = c(-70, 30)) +
+    labs(x = 'PhyloCSF / number of codons', y = 'Density', title = 'Human') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+
+p2 <- ggplot(ncorfs_cons[species == 'Mouse' & method == 'ASR'], aes(x = phylocsf_pc)) +
+    geom_density(position = 'identity', show.legend = FALSE, fill = '#8DD3C7') +
+    geom_vline(xintercept = 0, linetype = 2) +
+    coord_cartesian(xlim = c(-20, 10)) +
+    labs(x = 'PhyloCSF / number of codons', y = 'Density', title = 'Mouse') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+p1 + p2
+ggsave('figures/ncorf_phylocsf_density.pdf', width = 6, height = 3)
+
+
+ggplot(ncorfs_cons[species == 'Human' & method == 'ASR'], aes(x = phylocsf_pc, y = bls_local)) +
+    geom_point(alpha = 0.2) +
+    geom_vline(xintercept = 0, linetype = 2) +
+    coord_cartesian(xlim = c(-70, 30)) +
+    labs(x = 'PhyloCSF per codon', y = 'Local BLS', title = 'Human') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+
+ncorfs_cons[method == 'ASR', as.list(table(phylocsf_pc > 0, useNA = 'ifany')), by = .(species)]
+
+
+ncorfs_cons[method == 'ASR', as.list(table(phylocsf_pc > log(1000), useNA = 'ifany')), by = .(species)]
+
+
+ncorfs_cons[method == 'ASR', as.list(table(bls_local > 0.9, useNA = 'ifany')), by = .(species)]
+
+
+ncorfs_cons[method == 'ASR', as.list(table(phylocsf > 10, useNA = 'ifany')), by = .(species)]
+
+
+ncorfs_cons[method == 'ASR', sum(bls_local > 0.9 & phylocsf_pc > 0), by = .(species)]
+
+
+# group by phylocsf > 0
+plt <- copy(ncorfs_cons)
+plt[, grp := ifelse(phylocsf > 0, 'PhyloCSF > 0', 'PhyloCSF < 0')]
+
+ggplot(plt, aes(x = bls_local, fill = grp)) +
+    geom_density(position = 'identity', alpha = 0.618) +
+    facet_wrap(vars(species)) +
+    labs(x = 'Local BLS', y = 'Density', fill = NULL) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+
+# group by local_bls > 0.9
+plt <- copy(ncorfs_cons)
+plt[, grp := ifelse(bls_local > 0.9, 'Local BLS > 0.9', 'local BLS < 0.9')]
+
+p1 <- ggplot(plt[species == 'Human' & method == 'ASR'], aes(x = phylocsf_pc, fill = grp)) +
+    geom_density(position = 'identity', alpha = 0.618) +
+    coord_cartesian(xlim = c(-50, 25)) +
+    scale_fill_brewer(palette = 'Dark2') +
+    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Human') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+
+p2 <- ggplot(plt[species == 'Mouse' & method == 'ASR'], aes(x = phylocsf_pc, fill = grp)) +
+    geom_density(position = 'identity', alpha = 0.618) +
+    coord_cartesian(xlim = c(-20, 10)) +
+    scale_fill_brewer(palette = 'Dark2') +
+    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Mouse') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+p1 + p2 + plot_layout(guides = 'collect')
+ggsave('figures/ncorf_phylocsf_pc_by_localBLS_ASR.pdf', width = 8, height = 3)
+
+p1 <- ggplot(plt[species == 'Human' & method == 'MRCA'], aes(x = phylocsf_pc, fill = grp)) +
+    geom_density(position = 'identity', alpha = 0.618) +
+    coord_cartesian(xlim = c(-50, 25)) +
+    scale_fill_brewer(palette = 'Dark2') +
+    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Human') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+
+p2 <- ggplot(plt[species == 'Mouse' & method == 'MRCA'], aes(x = phylocsf_pc, fill = grp)) +
+    geom_density(position = 'identity', alpha = 0.618) +
+    coord_cartesian(xlim = c(-20, 10)) +
+    scale_fill_brewer(palette = 'Dark2') +
+    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Mouse') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+p1 + p2 + plot_layout(guides = 'collect')
+ggsave('figures/ncorf_phylocsf_pc_by_localBLS_MRCA.pdf', width = 8, height = 3)
+
+tmp <- plt[, .(p = wilcox.test(
+    phylocsf_pc[bls_local > 0.9], phylocsf_pc[bls_local < 0.9]
+)$p.value), keyby = .(species, method)]
+tmp[, p2 := sprintf('%.2e', p)]
+tmp[, .(species, method, p2)]
+
+
+tmp <- plt[, .N, keyby = .(species, method, grp, phylocsf_pc > 0)]
+tmp <- dcast(tmp, species + method + grp ~ phylocsf_pc)
+tmp[, frac := `TRUE`/(`FALSE` + `TRUE`)]
+
+tmp[, sprintf('%.2e', fisher.test(as.matrix(.SD))$p.value), by = .(species, method), .SDcols = c('FALSE', 'TRUE')]
+
+```
+
+
+## ncORF origin
+- view correspondance between node number and label: `View(as_tibble(tree_human))`
 
 Human
 ```{r}
@@ -512,17 +548,16 @@ stat_age_human <- melt(bls_human, id.vars = 'uid',
                        measure.vars = c('naive_age_global', 'origin_age_global'))
 stat_age_human[, method := ifelse(variable == 'naive_age_global', 'MRCA', 'ASR')]
 stat_age_human <- stat_age_human[, .(cnt = .N), by = .(method, label = value)]
-# treat those without alignments as human-specific
-stat_age_human[label == 'hg38', cnt := cnt + nrow(ncorfs_human) - nrow(bls_human)]
 stat_age_human <- dcast(stat_age_human, label ~ method)
-# species specific
-# hg38  212   68
+# species-specific
+stat_age_human[label == 'hg38']
+
 
 stat_lcon_human <- lcon_human[bls_local > 0.9, .(cnt = .N), by = .(label = age, method)]
 stat_lcon_human <- dcast(stat_lcon_human, label ~ method)
 colSums(stat_lcon_human[, .(ASR, MRCA)])
 #  ASR MRCA 
-# 2037 1020
+# 1889 889
 
 
 library(treeio)
@@ -576,21 +611,21 @@ plot_tree_human <- function(tree_in, collapse_nodes=TRUE){
         scaleClade(167, .1) |> 
         scaleClade(186, .1) |> 
         collapse(119, mode = 'min', fill = fill_col, alpha = 0.6,
-                 clade_name = 'Old world monkeys') |>  # Cercopithecidae
+                 clade_name = 'Old world monkeys') |>  #猴科，Cercopithecidae
         collapse(122, mode = 'min', fill = fill_col, alpha = 0.6,
-                 clade_name = 'New world monkeys') |>  # Cebidae
+                 clade_name = 'New world monkeys') |>  #卷尾猴科 Cebidae
         collapse(123, mode = 'min', fill = fill_col, alpha = 0.6,
-                 clade_name = 'Glires') |> 
+                 clade_name = 'Glires') |>   # 啮齿总目
         collapse(135, mode = 'min', fill = fill_col, alpha = 0.6,
-                 clade_name = 'Laurasiatheria') |>  
+                 clade_name = 'Laurasiatheria') |>   # # 啮齿总目
         collapse(159, mode = 'min', fill = fill_col, alpha = 0.6,
-                 clade_name = 'Afrotheria') |>
+                 clade_name = 'Afrotheria') |> # 非洲兽总目(include 长鼻目)
         collapse(165, mode = 'min', fill = fill_col, alpha = 0.6, 
-                 clade_name = 'Marsupials') |>   
+                 clade_name = 'Marsupials') |>   # 有袋类
         collapse(167, mode = 'min', fill = fill_col, alpha = 0.6, 
-                 clade_name = 'Reptilia & Aves') |>  
+                 clade_name = 'Reptilia & Aves') |>  # 爬行动物与鸟类
         collapse(186, mode = 'min', fill = fill_col, alpha = 0.6, 
-                 clade_name = 'Actinopteri')  
+                 clade_name = 'Actinopteri')  # 辐鳍鱼纲
     return(p2)
 }
 
@@ -601,7 +636,17 @@ tree_tmp$node.label <- tdata_human$lcon_ASR
 p2 <- plot_tree_human(tree_tmp)
 p1 + p2
 ggsave('figures/distribution_of_origin_human_asr.pdf', width = 12, height = 6)
+
+tree_tmp <- copy(tree_human)
+tree_tmp$node.label <- tdata_human$MRCA
+p1 <- plot_tree_human(tree_tmp)
+tree_tmp$node.label <- tdata_human$lcon_MRCA
+p2 <- plot_tree_human(tree_tmp)
+p1 + p2
+ggsave('figures/distribution_of_origin_human_mrca.pdf', width = 12, height = 6)
+
 ```
+!!! note: species-specific counts should be labelled manually!!!
 
 Mouse
 ```{r}
@@ -619,16 +664,18 @@ stat_age_mouse <- melt(bls_mouse, id.vars = 'uid',
                        measure.vars = c('naive_age_global', 'origin_age_global'))
 stat_age_mouse[, method := ifelse(variable == 'naive_age_global', 'MRCA', 'ASR')]
 stat_age_mouse <- stat_age_mouse[, .(cnt = .N), by = .(method, label = value)]
-# treat those without alignments as mouse-specific
-stat_age_mouse[label == 'mm39', cnt := cnt + nrow(ncorfs_mouse) - nrow(bls_mouse)]
 stat_age_mouse <- dcast(stat_age_mouse, label ~ method)
-# mm39 2465 1746
+# species-specific
+stat_age_mouse[label == 'mm39']
+#     label   ASR  MRCA
+#    <char> <int> <int>
+# 1:   mm39  2262  1552
 
 stat_lcon_mouse <- lcon_mouse[bls_local > 0.9, .(cnt = .N), by = .(label = age, method)]
 stat_lcon_mouse <- dcast(stat_lcon_mouse, label ~ method)
 colSums(stat_lcon_mouse[, .(ASR, MRCA)])
 #  ASR MRCA 
-# 4236 3343
+# 4087 3212
 
 # plot mouse full tree
 tree_mouse <- read.tree('data/evolution/mouse_global_tree.nwk')
@@ -658,6 +705,7 @@ tdata_mouse[, `:=`(ASR = ifelse(is.na(ASR), '', as.character(ASR)),
                    lcon_ASR = ifelse(is.na(lcon_ASR), '', as.character(lcon_ASR)),
                    lcon_MRCA = ifelse(is.na(lcon_MRCA), '', as.character(lcon_MRCA)))]
 
+
 plot_tree_mouse <- function(tree_in, collapse_nodes=TRUE){
     p <- ggtree(tree_in, branch.length = 'none', ladderize = FALSE) +
         geom_tiplab() +
@@ -674,7 +722,7 @@ plot_tree_mouse <- function(tree_in, collapse_nodes=TRUE){
     scaleClade(60, .2) |> 
     scaleClade(69, .5) |> 
     collapse(50, mode = 'min', fill = fill_col, alpha = 0.6,
-                 clade_name = 'Rabbits') |>  # (Lagomorpha)
+                 clade_name = 'Rabbits') |>  # 兔形目(Lagomorpha)
     collapse(52, mode = 'min', fill = fill_col, alpha = 0.6,
                  clade_name = 'Primates') |> 
     collapse(60, mode = 'min', fill = fill_col, alpha = 0.6,
@@ -736,14 +784,14 @@ ggsave('figures/dist2ref_vs_locally_conserved_orfs_MRCA.pdf', width = 6, height 
 
 origin_stat[, .(
     ASR_corr = cor.test(dist2ref, lcon_ASR / ASR, method = 'spearman')$estimate,
-    ASR_pval = cor.test(dist2ref, lcon_ASR / ASR, method = 'spearman')$p.value
+    ASR_pval = cor.test(dist2ref, lcon_ASR / ASR, method = 'spearman')$p.value,
+    MRCA_corr = cor.test(dist2ref, lcon_MRCA / MRCA, method = 'spearman')$estimate,
+    MRCA_pval = cor.test(dist2ref, lcon_MRCA / MRCA, method = 'spearman')$p.value
 ), by = .(species)]
-#    species   ASR_corr     ASR_pval
-# 1:   Human -0.7647059 0.0003342936
-# 2:   Mouse -0.1780220 0.5423155834
+
 
 # ---------------------------------------------------------------------------------------------
-# whether number of ORFs originated (scaled by branch length) correlate with node age?
+# whether number of ORFs originated (scaled by branch length) correlate with node age (node-to-tip distance)?
 origin_stat[, pseudo_bl := branch_length]
 origin_stat[is.na(pseudo_bl), pseudo_bl := 1] 
 # root node have no branch length, could be very large, but we only set to pseudo-value of 1
@@ -756,24 +804,74 @@ ggplot(origin_stat, aes(x = dist2ref, y = ASR/pseudo_bl)) +
     labs(x = 'Age of origination node', y = '# of ORFs / Branch length')
 ggsave('figures/origin_age_vs_orf_numbers_ASR.pdf', width = 6, height = 3)
 
+ggplot(origin_stat, aes(x = dist2ref, y = MRCA/pseudo_bl)) +
+    geom_smooth(method = 'lm') +
+    geom_point(size = 3, alpha = 0.6) +
+    scale_y_log10() +
+    facet_wrap(vars(species), scales = 'free') +
+    labs(x = 'Age of origin node', y = '# of ORFs / Branch length')
+ggsave('figures/origin_age_vs_orf_numbers_MRCA.pdf', width = 7, height = 3)
 
 origin_stat[, .(
     ASR_corr = cor.test(dist2ref, ASR/pseudo_bl, method = 'spearman')$estimate,
-    ASR_pval = cor.test(dist2ref, ASR/pseudo_bl, method = 'spearman')$p.value
+    ASR_pval = cor.test(dist2ref, ASR/pseudo_bl, method = 'spearman')$p.value,
+    MRCA_corr = cor.test(dist2ref, MRCA/pseudo_bl, method = 'spearman')$estimate,
+    MRCA_pval = cor.test(dist2ref, MRCA/pseudo_bl, method = 'spearman')$p.value
 ), by = .(species)]
-# "  species   ASR_corr    ASR_pval
-# 1:   Human -0.6800826 0.002514381
-# 2:   Mouse -0.7758242 0.001741787
+
 
 # still significant after excluding the root node
 origin_stat[, .(
     ASR_corr = cor.test(dist2ref, ASR/branch_length, method = 'spearman')$estimate,
     ASR_pval = cor.test(dist2ref, ASR/branch_length, method = 'spearman')$p.value
 ), by = .(species)]
-#    species   ASR_corr    ASR_pval
-#     <char>      <num>       <num>
-# 1:   Human -0.6200980 0.009351552
-# 2:   Mouse -0.7197802 0.007497812
+
+```
+
+Simple stats
+```{r}
+# ORFs originated since the most recent mammalian ancestor
+stat_age_human[readr::parse_number(label) > 5, sum(ASR)]  # 7319
+stat_age_human[readr::parse_number(label) > 5, sum(ASR)] / sum(stat_age_human$ASR)  # 0.6296997
+
+stat_age_mouse[readr::parse_number(label) > 4, sum(ASR)]  # 13508
+stat_age_mouse[readr::parse_number(label) > 4, sum(ASR)] / sum(stat_age_mouse$ASR)  # 0.8283559
+
+# denovo ncORFs
+ncorfs_cons[method == 'ASR', .(prop = sum(origin == 'denovo')/.N), by = .(species)]
+#    species      prop
+#     <char>     <num>
+# 1:   Human 0.5174224
+# 2:   Mouse 0.5082803
+```
+
+Origin vs evolution
+```{r}
+plt <- ncorfs_cons[method == 'ASR']
+
+p1 <- ggplot(plt, aes(x = bls_local, fill = origin)) +
+    geom_density(position = 'identity', alpha = 0.6) +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    scale_fill_discrete_c4a_cat('brewer.set1') +
+    labs(x = 'Local BLS', y = 'Density', fill = NULL)
+
+p2 <- ggplot(plt, aes(x = bls_global, fill = origin)) +
+    geom_density(position = 'identity', alpha = 0.6) +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    scale_fill_discrete_c4a_cat('brewer.set1') +
+    labs(x = 'Global BLS', y = 'Density', fill = NULL)
+
+p3 <- ggplot(plt, aes(x = phylocsf_pc, fill = origin)) +
+    geom_density(position = 'identity', alpha = 0.6) +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+    scale_fill_discrete_c4a_cat('brewer.set1') +
+    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL)
+
+p1 / p2 / p3
+ggsave('figures/ncorf_origin_vs_bls_phylocsf_density.pdf', width = 8, height = 9)
 ```
 
 save results
@@ -784,188 +882,9 @@ ncorfs_cons[lcon_mouse, age := i.age, on = .(uid, method)]
 fwrite(ncorfs_cons, 'results/ncorfs_bls_phylocsf.tsv', sep = '\t')
 fwrite(origin_stat, 'results/ncorfs_origin_node_stat.tsv', sep = '\t')
 
-ncorfs_cons[method == 'ASR', .(prop = sum(origin == 'denovo')/.N), by = .(species)]
-# Key: <species>
-#    species      prop
-#     <char>     <num>
-# 1:   Human 0.5070976
-# 2:   Mouse 0.5053656
-```
-
-# conservation scores
-## phyloCSF
-  - human：/nfs_data/changy/poj/ORF/human_riboseq/evolution_174/human_phyloCSF_ncorf.txt
-  - mouse: /nfs_data/changy/poj/ORF/mouse_riboseq/evolution_209/mouse_phyloCSF_ncorf.txt
-  
-```{bash}
-# human
-for i in bls_result/*result.txt; do j=$(basename $i); echo python ~zhangh/tmp/bls/orf_maf.py $i hg38.100way.nh maf_block/${j%%.result.txt}_filter_stop_codon.fa hg38 phylocsf_nostop_codon/${j%%.result.txt}_phylocsf.txt ; done>15_human_phylocsf.sh
-for i in phylocsf_nostop_codon/*; do echo ~admin/miniforge3/bin/phylocsf++ score-msa --threads 16 100vertebrates $i ; done >16_human_score_msa.sh
-# mouse
-for i in bls_result/*result.txt; do j=$(basename $i); echo python ~zhangh/tmp/bls/orf_maf.py $i mm39.35way.root.nh maf_block/${j%%.result.txt}_filter_stop_codon.fa mm39 phylocsf_nostop_codon/${j%%.result.txt}_phylocsf.txt ; done>15_mouse_phylocsf.sh
-for i in phylocsf_nostop_codon/*; do echo ~admin/miniforge3/bin/phylocsf++ score-msa --mapping mapping_name.tsv --threads 16 100vertebrates $i ; done >16_mouse_score_msa.sh
-```
-
-## PhyloCSF
-```{r}
-# rbind PhyloCSF
-read_dtt <- function(x){
-  dtt <- read.table(x, header = T)
-}
-files_human <- list.files('evolution_174/phylocsf_nostop_codon/', pattern = '_phylocsf.txt.scores' , full.names = T)
-names(files_human) <- sub('phylocsf_nostop_codon/.*', '', basename(files_human))
-sum_data_human <- bind_rows(lapply(files_human, read_dtt), .id = 'id') %>%   
-  mutate(id = gsub('_phylocsf.txt.scores', '', id))
-write_tsv(sum_data_human, "human_phyloCSF_ncorf.txt")
-
-files_mouse <- list.files('evolution_209/phylocsf_nostop_codon/', pattern = '_phylocsf.txt.scores' , full.names = T)
-names(files_mouse) <- sub('phylocsf_nostop_codon/.*', '', basename(files_mouse))
-sum_data_mouse <- bind_rows(lapply(files_mouse, read_dtt), .id = 'id') %>%   
-  mutate(id = gsub('_phylocsf.txt.scores', '', id))
-write_tsv(sum_data_mouse, "mouse_phyloCSF_ncorf.txt")
-
-read_phylocsf <- function(path){
-    scores <- fread(path)
-    scores <- scores[, .(uid = id, method = seq, orf_len = end,
-                         phylocsf = phylocsf.score, codon_bls = bls.score)]
-    scores[, method := ifelse(method == 'naive', 'MRCA', 'ASR')]
-    return(scores)
-}
-
-phylocsf_human <- read_phylocsf('data/evolution/human_phyloCSF_ncorf.txt')
-phylocsf_human <- phylocsf_human[uid %in% ncorfs_human$uid]
-
-phylocsf_mouse <- read_phylocsf('data/evolution/mouse_phyloCSF_ncorf.txt')
-phylocsf_mouse <- phylocsf_mouse[uid %in% ncorfs_mouse$uid]
-
-
-# combine conservation scores: BLS & PhyloCSF
-ncorfs_cons <- melt(
-    ncorfs_bls,
-    id.vars = c('species', 'uid', 'origin_manner'),
-    measure.vars = c(
-        'bls_global_origin', 'bls_local_origin',
-        'bls_global_naive', 'bls_local_naive'),
-    value.name = 'bls')
-ncorfs_cons[, c('tree', 'method') := tstrsplit(variable, '_')[2:3]]
-ncorfs_cons[, variable := NULL]
-setnames(ncorfs_cons, 'origin_manner', 'origin')
-ncorfs_cons <- dcast(ncorfs_cons, species + uid + origin + method ~ tree, value.var = 'bls')
-setnames(ncorfs_cons, c('global', 'local'), c('bls_global', 'bls_local'))
-ncorfs_cons[, method := ifelse(method == 'naive', 'MRCA', 'ASR')]  # all ncORFs are included
-
-ncorfs_cons <- merge(ncorfs_cons, rbind(Human = phylocsf_human, Mouse = phylocsf_mouse, idcol='species'),
-      by = c('species', 'uid', 'method'), all.x = TRUE)
-ncorfs_cons[, phylocsf_pc := phylocsf/(orf_len/3)]  # get PhyloCSF per codon
-
-p1 <- ggplot(ncorfs_cons[species == 'Human' & method == 'ASR'], aes(x = phylocsf_pc)) +
-    geom_density(position = 'identity', show.legend = FALSE, fill = '#44AA99') +
-    geom_vline(xintercept = 0, linetype = 2) +
-    coord_cartesian(xlim = c(-70, 30)) +
-    labs(x = 'PhyloCSF / number of codons', y = 'Density', title = 'Human') +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-
-p2 <- ggplot(ncorfs_cons[species == 'Mouse' & method == 'ASR'], aes(x = phylocsf_pc)) +
-    geom_density(position = 'identity', show.legend = FALSE, fill = '#44AA99') +
-    geom_vline(xintercept = 0, linetype = 2) +
-    coord_cartesian(xlim = c(-20, 10)) +
-    labs(x = 'PhyloCSF / number of codons', y = 'Density', title = 'Mouse') +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-p1 + p2
-ggsave('figures/ncorf_phylocsf_density.pdf', width = 8, height = 3.5)
-
-
-ggplot(ncorfs_cons[species == 'Human' & method == 'ASR'], aes(x = phylocsf_pc, y = bls_local)) +
-    geom_point(alpha = 0.2) +
-    geom_vline(xintercept = 0, linetype = 2) +
-    coord_cartesian(xlim = c(-70, 30)) +
-    labs(x = 'PhyloCSF per codon', y = 'Local BLS', title = 'Human') +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-
-ncorfs_cons[method == 'ASR', as.list(table(phylocsf_pc > 0, useNA = 'ifany')), by = .(species)]
-# "  species FALSE  TRUE    NA
-#     <char> <int> <int> <int>
-# 1:   Human 10357  2103     9
-# 2:   Mouse 11226  5555   179"
-
-ncorfs_cons[method == 'ASR', as.list(table(phylocsf > log(1000), useNA = 'ifany')), by = .(species)]
-# "  species FALSE  TRUE    NA
-#     <char> <int> <int> <int>
-# 1:   Human 10615  1845     9
-# 2:   Mouse 12332  4449   179"
-
-ncorfs_cons[method == 'ASR', as.list(table(bls_local > 0.9, useNA = 'ifany')), by = .(species)]
-# "  species FALSE  TRUE
-#     <char> <int> <int>
-# 1:   Human 10432  2037
-# 2:   Mouse 12724  4236"
-
-# group by phylocsf > 0
-plt <- copy(ncorfs_cons)
-plt[, grp := ifelse(phylocsf > 0, 'PhyloCSF > 0', 'PhyloCSF < 0')]
-
-ggplot(plt, aes(x = bls_local, fill = grp)) +
-    geom_density(position = 'identity', alpha = 0.618) +
-    facet_wrap(vars(species)) +
-    labs(x = 'Local BLS', y = 'Density', fill = NULL) +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-
-# group by local_bls > 0.9
-plt <- copy(ncorfs_cons)
-plt[, grp := ifelse(bls_local > 0.9, 'Local BLS > 0.9', 'local BLS < 0.9')]
-
-p1 <- ggplot(plt[species == 'Human' & method == 'ASR'], aes(x = phylocsf_pc, fill = grp)) +
-    geom_density(position = 'identity', alpha = 0.618) +
-    coord_cartesian(xlim = c(-50, 25)) +
-    scale_fill_brewer(palette = 'Dark2') +
-    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Human') +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-
-p2 <- ggplot(plt[species == 'Mouse' & method == 'ASR'], aes(x = phylocsf_pc, fill = grp)) +
-    geom_density(position = 'identity', alpha = 0.618) +
-    coord_cartesian(xlim = c(-20, 10)) +
-    scale_fill_brewer(palette = 'Dark2') +
-    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Mouse') +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-p1 + p2 + plot_layout(guides = 'collect')
-ggsave('figures/ncorf_phylocsf_pc_by_localBLS_ASR.pdf', width = 8, height = 3)
-
-p1 <- ggplot(plt[species == 'Human' & method == 'MRCA'], aes(x = phylocsf_pc, fill = grp)) +
-    geom_density(position = 'identity', alpha = 0.618) +
-    coord_cartesian(xlim = c(-50, 25)) +
-    scale_fill_brewer(palette = 'Dark2') +
-    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Human') +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-
-p2 <- ggplot(plt[species == 'Mouse' & method == 'MRCA'], aes(x = phylocsf_pc, fill = grp)) +
-    geom_density(position = 'identity', alpha = 0.618) +
-    coord_cartesian(xlim = c(-20, 10)) +
-    scale_fill_brewer(palette = 'Dark2') +
-    labs(x = 'PhyloCSF per codon', y = 'Density', fill = NULL, title = 'Mouse') +
-    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
-p1 + p2 + plot_layout(guides = 'collect')
-ggsave('figures/ncorf_phylocsf_pc_by_localBLS_MRCA.pdf', width = 8, height = 3)
-
-tmp <- plt[, .(log10p = log10(wilcox.test(
-    phylocsf_pc[bls_local > 0.9], phylocsf_pc[bls_local < 0.9]
-)$p.value)), keyby = .(species, method)]
-# "  species method     log10p
-#     <char> <char>      <num>
-# 1:   Human    ASR       -Inf
-# 2:   Human   MRCA -152.51305
-# 3:   Mouse    ASR  -98.74937
-# 4:   Mouse   MRCA  -94.34251"
-
-tmp <- plt[, .N, keyby = .(species, method, grp, phylocsf_pc > 0)]
-tmp <- dcast(tmp, species + method + grp ~ phylocsf_pc)
-tmp[, frac := `TRUE`/(`FALSE` + `TRUE`)]
-
-
-tmp[, fisher.test(as.matrix(.SD))$p.value, by = .(species, method), .SDcols = c('FALSE', 'TRUE')]
-#    species method            V1
-#     <char> <char>         <num>
-# 1:   Human    ASR 1.597624e-150
-# 2:   Human   MRCA  2.768208e-60
-# 3:   Mouse    ASR  4.721148e-34
-# 4:   Mouse   MRCA  5.361553e-35
+tmp <- ncorfs_cons[method == 'ASR', .(
+    species, orf_id = uid, origin_manner = origin,
+    origin_node = age, bls_global, bls_local,
+    overall_phylocsf = phylocsf, phylocsf_per_codon = phylocsf_pc)]
+writexl::write_xlsx(tmp, 'results/Table_ncorfs_bls_phylocsf.xlsx')
 ```

@@ -1,0 +1,871 @@
+---
+title: "Final catalog of predicted ncORFs and overview"
+editor: source
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+## Kozak sequence, secondary structure, codon and AA usage
+### Kozak sequence
+```bash
+# pwd: /home/mt1022/poj/ncorf_mammals/data/ncorf_v2412
+awk 'BEGIN{FS=","; OFS="\t"}{print $1,$7,$8}' human_three_methods_ncorf.final.csv | sed '1s/uid/orf_id/' > human_three_methods_ncorf.final.kozak_input.tsv
+python ~admin/scripts/orf_kozak.py -f /nfs_data/database/ref_genomes/human_GRCh38/ens107/Homo_sapiens.GRCh38.cdna_and_ncrna.fa -i human_three_methods_ncorf.final.kozak_input.tsv >human_three_methods_ncorf.final.kozak.tsv
+
+awk 'BEGIN{FS=","; OFS="\t"}{print $1,$7,$8}' mouse_three_methods_ncorf.final.csv | sed '1s/uid/orf_id/' > mouse_three_methods_ncorf.final.kozak_input.tsv
+python ~admin/scripts/orf_kozak.py -f /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.cdna_and_ncrna.fa -i mouse_three_methods_ncorf.final.kozak_input.tsv >mouse_three_methods_ncorf.final.kozak.tsv
+
+# CDS
+# pwd: ~/poj/ncorf_mammals/data
+awk 'BEGIN { OFS="\t"; print "orf_id", "tx_name", "tstart" } NR>1 { print $1,$2, $9+1 }' Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv >Mus_musculus.GRCm39.107.txinfo.rep.pcg.kozak_input.tsv
+awk 'BEGIN { OFS="\t"; print "orf_id", "tx_name", "tstart" } NR>1 { print $1,$2, $10+1 }' Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv >Homo_sapiens.GRCh38.107.txinfo.rep.pcg.kozak_input.tsv
+
+# pwd: /nfs_data/zhangh/ncorf_mammals/ncorf_v2412
+python ~admin/scripts/orf_kozak.py -f /nfs_data/database/ref_genomes/human_GRCh38/ens107/Homo_sapiens.GRCh38.cdna_and_ncrna.fa -i Homo_sapiens.GRCh38.107.txinfo.rep.pcg.kozak_input.tsv >Homo_sapiens.GRCh38.107.txinfo.rep.pcg.kozak.tsv
+python ~admin/scripts/orf_kozak.py -f /nfs_data/database/ref_genomes/mouse_GRCm39/ens107/Mus_musculus.GRCm39.cdna_and_ncrna.fa -i Mus_musculus.GRCm39.107.txinfo.rep.pcg.kozak_input.tsv >Mus_musculus.GRCm39.107.txinfo.rep.pcg.kozak.tsv
+
+```
+
+### RNAfold around start codons
+upstream 30 + downstream 120
+```{r}
+library(stringr)
+library(data.table)
+
+ncorf_human <- fread('data/ncorf_v2412/human_three_methods_ncorf.final.meta.tsv')
+ncorf_mouse <- fread('data/ncorf_v2412/mouse_three_methods_ncorf.final.meta.tsv')
+
+get_start_flank <- function(ncorf, path_cdna, path_txrep, path_output){
+    txrep <- fread(path_txrep)
+    txrep[, tstart := utr5_len + 1]
+    cdna <- Biostrings::readDNAStringSet(path_cdna)
+    names(cdna) <- str_remove(names(cdna), '\\..*')
+    ncorf <- ncorf[tstart >= 31 & tstart + 120 - 1 < tx_len]
+    txrep <- txrep[tstart >= 31 & tstart + 120 - 1 < tx_len]
+    ncorf_seq <- Biostrings::subseq(cdna[ncorf$tx_name], start = ncorf$tstart - 30, width = 150)
+    names(ncorf_seq) <- ncorf$uid
+    cds_seq <- Biostrings::subseq(cdna[txrep$tx_name], start = txrep$tstart - 30, width = 150)
+    seq_all <- c(ncorf_seq, cds_seq)
+    Biostrings::writeXStringSet(seq_all, path_output)
+    invisible(NULL)
+}
+
+get_start_flank(
+    ncorf = ncorf_human,
+    path_cdna = 'data/Homo_sapiens.GRCh38.cdna_and_ncrna.fa.gz',
+    path_txrep = 'data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv',
+    path_output = 'data/ncorf_v2412/human_start_flanking_150nt.fa')
+
+get_start_flank(
+    ncorf = ncorf_mouse,
+    path_cdna = 'data/Mus_musculus.GRCm39.cdna_and_ncrna.fa.gz',
+    path_txrep = 'data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv',
+    path_output = 'data/ncorf_v2412/mouse_start_flanking_150nt.fa')
+```
+
+```{bash}
+RNAfold  <human_start_flanking_150nt.fa >human_start_flanking_150nt.fold --noPS -j16
+RNAfold  <mouse_start_flanking_150nt.fa >mouse_start_flanking_150nt.fold --noPS -j16
+```
+
+### Analysis
+```{r}
+library(data.table)
+library(ggplot2)
+library(stringr)
+library(cols4all)
+library(patchwork)
+
+theme_set(theme_classic(base_size = 12) + theme(
+    axis.text = element_text(color = 'black'),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)))
+
+orflevels <- c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF')
+
+tofct_orflevels <- function(x, reverse = FALSE){
+    x[x == 'lncRNA-ORF'] <- 'lncORF'
+    if(reverse){
+        factor(x, levels = rev(orflevels))
+    }else{
+        factor(x, levels = orflevels)
+    }
+}
+```
+
+#### Compare AA/codon frequency
+AA
+```{r}
+phychem_files <- c(
+    'Human_ncORF' = 'data/ncorf_annot/human_three_methods_ncorf.physiocochemical.tsv',
+    'Mouse_ncORF' = 'data/ncorf_annot/mouse_three_methods_ncorf.physiocochemical.tsv',
+    'Human_CDS'   = 'data/ncorf_annot/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.physiocochemical.tsv',
+    'Mouse_CDS'   = 'data/ncorf_annot/Mus_musculus.GRCm39.107.txinfo.rep.pcg.physiocochemical.tsv'
+)
+
+get_aafreq <- function(path){
+    dat <- fread(path)
+    if(str_detect(path, 'ncORF')){
+        dat <- dat[name %in% c(ncorf_human$uid, ncorf_mouse$uid)]
+    }
+    seqs <- Biostrings::AAStringSet(setNames(dat[[2]], dat[[1]]))
+    colSums(Biostrings::alphabetFrequency(seqs)[, 1:20])
+}
+
+ncorf_aafreq <- sapply(phychem_files, get_aafreq)
+ncorf_aafreq <- as.data.table(ncorf_aafreq, keep.rownames = 'AA')
+ncorf_aafreq <- melt(ncorf_aafreq, id = 'AA', value.name = 'count')
+ncorf_aafreq[, c('species', 'type') := tstrsplit(variable, '_')]
+ncorf_aafreq <- ncorf_aafreq[, .(species, type, AA, count)]
+ncorf_aafreq[, frac := count/sum(count), by = .(species, type)]
+
+fwrite(ncorf_aafreq, 'results/ncorf_AA_suage.tsv', sep = '\t')
+
+plt <- dcast(ncorf_aafreq, species + AA ~ type, value.var = c('count', 'frac'))
+
+plt[, pvalue := {
+    m <- cbind(count_CDS, count_ncORF)
+    ms <- colSums(m)
+    apply(m, 1, function(x){
+        chisq.test(cbind(x, ms - x))$p.value
+    })
+}]
+plt[, padj := p.adjust(pvalue, 'BH'), by = .(species)]
+
+ggplot(plt, aes(x = frac_CDS, y = frac_ncORF, fill = padj < 0.05)) +
+    geom_abline(slope = 1, intercept = 0, linetype=2, color='red') +
+    geom_point(size=3, shape=21, show.legend = FALSE, alpha = 0.6) +
+    ggrepel::geom_text_repel(aes(label = AA)) +
+    scale_fill_manual(values = c('grey', 'black')) +
+    facet_wrap(vars(species), scales = 'free') +
+    coord_cartesian(xlim=c(0, 0.1), ylim = c(0, 0.1)) +
+    labs(x = 'Amino acid frequency in CDSs', y = 'Amino acid frequency in ncORFs')
+ggsave('figures/ncorf_aafreq_vs_ncorf.pdf', width = 8, height = 4)
+```
+
+codon
+```{r}
+get_cds_codon_freq <- function(path_txrep_pcg, path_cds){
+    # path_txrep_pcg <- 'data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv'
+    # path_cds <- 'data/Homo_sapiens.GRCh38.cds.all.fa.gz'
+    txrep_pcg <- fread(path_txrep_pcg)
+    cds <- Biostrings::readDNAStringSet(path_cds)
+    names(cds) <- str_remove(names(cds), r'(\.\d+.*)')
+    cds <- cds[Biostrings::width(cds) >= 150]
+    cds <- cds[names(cds) %in% txrep_pcg$tx_name]
+    cds <- Biostrings::subseq(cds, start = 4, end = Biostrings::width(cds) - 3)
+    cds <- cds[Biostrings::width(cds) %% 3 == 0]
+    cf_cds <- Biostrings::trinucleotideFrequency(cds, step = 3)
+    cft_cds <- data.table(codon = colnames(cf_cds), cnt = colSums(cf_cds))
+    cft_cds <- cft_cds[!codon %in% c('TAA', 'TAG', 'TGA')]
+}
+
+cft_cds_human <- get_cds_codon_freq(
+    'data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv',
+    'data/Homo_sapiens.GRCh38.cds.all.fa.gz')
+
+cft_cds_mouse <- get_cds_codon_freq(
+    'data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv',
+    'data/Mus_musculus.GRCm39.cds.all.fa.gz')
+
+get_ncorf_codon_freq <- function(path_seq_ncorf, ncorf){
+    ncorf_seq <- Biostrings::readDNAStringSet(path_seq_ncorf)
+    ncorf_seq <- Biostrings::subseq(ncorf_seq, start = 4, end = Biostrings::width(ncorf_seq) - 3)
+    cf <- Biostrings::trinucleotideFrequency(ncorf_seq, step = 3)
+    cft <- as.data.table(cf)
+    cft[, uid := names(ncorf_seq)]
+    cft <- cft[uid %in% ncorf$uid]
+    cft[ncorf, orf_type := i.orf_type, on = .(uid)]
+    cft <- cft[, lapply(.SD, sum), by = .(orf_type), .SDcols = colnames(cf)]
+    cft <- melt(cft, id.vars = 'orf_type', variable.name = 'codon',
+                value.name = 'cnt', variable.factor = FALSE)
+    cft <- cft[!codon %in% c('TAA', 'TAG', 'TGA')]
+}
+
+cft_ncorf_human <- get_ncorf_codon_freq(
+    'data/ncorf_v2412/human_three_methods_ncorf.final.nuc.fa', ncorf_human)
+
+cft_ncorf_mouse <- get_ncorf_codon_freq(
+    'data/ncorf_v2412/mouse_three_methods_ncorf.final.nuc.fa', ncorf_mouse)
+
+
+cft_ncorf_type <- rbind(Human = cft_ncorf_human, Mouse = cft_ncorf_mouse, idcol = 'species')
+cft_ncorf_type[, prop := cnt/sum(cnt), by = .(species, orf_type)]
+cft_ncorf <- cft_ncorf_type[, .(cnt = sum(cnt)), by = .(species, codon)]
+cft_ncorf[, prop := cnt/sum(cnt), by = .(species)]
+
+cft_cds <- rbind(Human = cft_cds_human, Mouse = cft_cds_mouse, idcol = 'species')
+cft_cds[, prop := cnt/sum(cnt), by = .(species)]
+
+cft_ncorf[cft_cds, `:=`(cnt_cds = i.cnt, prop_cds = i.prop), on = .(species, codon)]
+cft_ncorf[, aacode := Biostrings::GENETIC_CODE[codon]]
+cft_ncorf[, label := str_c(aacode, ':', codon)]
+
+cft_ncorf[, pvalue := {
+    m <- cbind(cnt, cnt_cds)
+    ms <- colSums(m)
+    apply(m, 1, function(x){
+        chisq.test(cbind(x, ms - x))$p.value
+    })
+}, by = .(species)]
+cft_ncorf[, padj := p.adjust(pvalue, 'BH'), by = .(species)]
+
+ggplot(cft_ncorf, aes(x = prop_cds, y = prop, fill = padj < 0.05)) +
+    geom_point(size = 2, shape = 21, alpha = 0.6, show.legend = FALSE) +
+    ggrepel::geom_text_repel(aes(label = label)) +
+    geom_abline(slope = 1, intercept = 0, linetype = 2, color = 'red') +
+    scale_fill_manual(values = c('grey', 'black')) +
+    facet_wrap(vars(species), scales = 'free') +
+    labs(x = 'Codon frequency in CDSs', y = 'Codon frequency in ncORFs')
+ggsave('figures/ncorf_codon_usage_vs_cds.pdf', width = 8, height = 4)
+
+cft_ncorf_type[cft_cds, `:=`(cnt_cds = i.cnt, prop_cds = i.prop), on = .(species, codon)]
+cft_ncorf_type[, aacode := Biostrings::GENETIC_CODE[codon]]
+cft_ncorf_type[, label := str_c(aacode, ':', codon)]
+cft_ncorf_type[, log2R := log2(prop/prop_cds)]
+cft_ncorf_type[, `:=`(rscu = cnt/mean(cnt), rscu_cds = cnt_cds/mean(cnt_cds)), by = .(species, aacode, orf_type)]
+cft_ncorf_type[, log2R := log2(rscu/rscu_cds)]
+
+plt <- copy(cft_ncorf_type)
+plt[, orf_type := tofct_orflevels(orf_type)]
+tmp <- plt[orf_type == 'uORF' & species == 'Human'][order(log2R)]
+plt[, label := factor(label, levels = tmp$label)]
+
+p1 <- ggplot(plt[species == 'Human'], aes(x = label, y = log2R, fill = aacode)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_discrete_c4a_cat('poly.alphabet2') +
+    facet_grid(rows = vars(orf_type)) +
+    labs(y = 'RSCU log2(ncORF/CDS)', x = NULL) +
+    theme(axis.text.x = element_text(
+        angle = 90, hjust = 1, vjust = 0.5))
+
+tmp <- plt[orf_type == 'uORF' & species == 'Mouse'][order(log2R)]
+plt[, label := factor(label, levels = tmp$label)]
+
+p2 <- ggplot(plt[species == 'Mouse'], aes(x = label, y = log2R, fill = aacode)) +
+    geom_col(show.legend = FALSE) +
+    scale_fill_discrete_c4a_cat('poly.alphabet2') +
+    facet_grid(rows = vars(orf_type)) +
+    labs(y = 'RSCU log2(ncORF/CDS)', x = NULL) +
+    theme(axis.text.x = element_text(
+        angle = 90, hjust = 1, vjust = 0.5))
+
+p1/p2
+ggsave('figures/ncorf_codon_rscu_vs_cds_bytype.pdf', width = 10, height = 10)
+
+fwrite(cft_ncorf, 'results/ncorf_codon_suage.tsv', sep = '\t')
+fwrite(cft_ncorf_type, 'results/ncorf_codon_suage_bytype.tsv', sep = '\t')
+```
+
+#### Kozak sequence
+```{r}
+pcode <- function(p){
+    res <- symnum(p, corr = FALSE, na = FALSE,
+                  cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1),
+                  symbols = c("***", "**", "*", ".", " "))
+    as.character(res)
+}
+
+kozak_orf_human <- fread('data/ncorf_v2412/human_three_methods_ncorf.final.kozak.tsv')
+kozak_orf_mouse <- fread('data/ncorf_v2412/mouse_three_methods_ncorf.final.kozak.tsv')
+kozak_orf_all <- rbind(Human = kozak_orf_human, Mouse = kozak_orf_mouse, idcol = 'species')
+
+
+plt <- rbind(Human = ncorf_human, Mouse = ncorf_mouse, idcol = 'species', fill = TRUE)
+plt[kozak_orf_all, `:=`(kozak_seq = i.kozak_seq, kozak_score = i.kozak_score), on = .(species, uid = orf_id)]
+
+tmp <- plt[, .N, keyby = .(species, start_codon, kozak_score == 2)]
+tmp[, grp := ifelse(kozak_score, 'optimal', 'not')]
+tmp[, type := ifelse(start_codon == 'ATG', 'AUG', 'non-AUG')]
+tmp <- dcast(tmp, species + start_codon + type ~ grp, value.var = 'N')
+tmp[, prop := optimal / (not + optimal)]
+tmp[tmp[start_codon == 'ATG'], `:=`(aug_not = i.not, aug_optimal = i.optimal), on = .(species)]
+tmp[, pval := fisher.test(matrix(c(not, optimal, aug_not, aug_optimal), nrow = 2))$p.value,
+    by = .(species, start_codon)]
+tmp[, plab := pcode(pval)]
+
+ggplot(tmp, aes(x = start_codon, y = prop, fill = type)) +
+    geom_col(show.legend = FALSE) +
+    geom_text(aes(label = plab), vjust = -0.25) +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_fill_discrete_c4a_cat('seaborn.pastel') +
+    scale_y_continuous(labels = scales::label_percent(),
+                       expand = expansion(mult = c(0, 0.1))) +
+    labs(x = NULL, y = '% with optimal Kozak sequence')
+ggsave('figures/kozak_aug_vs_nonaug.pdf', width = 4, height = 3)
+
+kozak_cds_human <- fread('data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.kozak.tsv')
+kozak_cds_mouse <- fread('data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.kozak.tsv')
+kozak_cds_all <- rbind(Human = kozak_cds_human, Mouse = kozak_cds_mouse, idcol = 'species', fill = TRUE)
+kozak_cds_all[, `:=`(grp = 'CDS', grp_start = 'CDS', grp_start2 = 'CDS', grp_type = 'CDS')]
+
+kozak_orf_all[ncorf_human, `:=`(start_codon = i.start_codon, orf_type = i.orf_type), on = .(orf_id = uid)]
+kozak_orf_all[ncorf_mouse, `:=`(start_codon = i.start_codon, orf_type = i.orf_type), on = .(orf_id = uid)]
+kozak_orf_all[, grp := 'ncORF']
+kozak_orf_all[, grp_start := start_codon]
+kozak_orf_all[, grp_start2 := ifelse(start_codon == 'ATG', 'AUG', 'non-AUG')]
+kozak_orf_all[, grp_type := orf_type]
+
+kozak_all <- rbind(kozak_cds_all, kozak_orf_all, fill = TRUE)
+
+ggplot(kozak_all, aes(x = grp, fill = factor(kozak_score))) +
+    geom_bar(position = 'fill') +
+    facet_wrap(vars(species))
+
+ggplot(kozak_all, aes(x = grp_type, fill = factor(kozak_score))) +
+    geom_bar(position = 'fill') +
+    facet_wrap(vars(species))
+
+ggplot(kozak_all, aes(x = grp_start, fill = forcats::fct_rev(factor(kozak_score)))) +
+    geom_bar(position = 'fill') +
+    facet_wrap(vars(species))
+
+
+ggplot(kozak_all, aes(x = grp_start2, fill = forcats::fct_rev(factor(kozak_score)))) +
+    geom_bar(position = 'fill') +
+    facet_wrap(vars(species))
+
+plt <- kozak_all[, .N, by = .(species, grp_start2, kozak_score)]
+plt[, prop := N/sum(N), by = .(species, grp_start2)]
+plt[, grp_start2 := factor(grp_start2, levels = c('CDS', 'AUG',  'non-AUG'))]
+plt[, kozak_score := forcats::fct_rev(factor(
+    kozak_score, levels = 0:2, labels = c('None', '-3A/G or +4G', '-3A/G & +4G')))]
+
+ggplot(plt, aes(x = grp_start2, y = prop, fill = kozak_score)) +
+    geom_col(position = position_dodge(width = 0.75),width = 0.75) +
+    facet_wrap(vars(species)) +
+    scale_fill_discrete_c4a_seq(palette = 'brewer.blues', reverse = TRUE) +
+    labs(x=NULL, y='Fraction of ORFs', fill = NULL) +
+    theme(legend.position = 'bottom')
+ggsave('figures/kozak_aug_vs_nonaug_cds.pdf', width = 4, height = 3)
+
+chisq.test(rbind(aug = c(2160 + 4219, 1948), naug = c(735 + 1492, 1069)))$p.value  # 1.58418e-23
+chisq.test(rbind(aug = c(3359 + 6933, 2843), naug = c(746 + 1565, 1039)))$p.value  # 4.85428e-30
+```
+conclusion: near cognate start codons are more likely to have better start codon context
+
+#### Structure around start codons
+```{r}
+#' pairing fraction
+pair_frac <- function(ss){
+    m <- tstrsplit(ss, split = '')
+    m <- sapply(m, \(x) x != '.')
+    res <- colSums(m)/nrow(m)
+    data.table(posn = seq_along(res), pfrac = res)
+}
+
+start_ss_human <- fread('data/ncorf_v2412/human_start_flanking_150nt.fold.tsv')
+start_ss_human <- ncorf_human[, .(uid, orf_type, grp = 'ncORF')][start_ss_human, on = .(uid = header)]
+start_ss_human[str_starts(uid, 'ENS'), `:=`(orf_type = 'CDS', grp = 'CDS')]
+start_ss_human[, start_codon := str_sub(sequence, 31, 33)]
+start_ss_human[, grp2 := ifelse(grp == 'CDS', 'CDS', ifelse(start_codon == 'AUG', 'AUG', 'non-AUG'))]
+
+plt <- start_ss_human[, pair_frac(structure), by = .(grp)]
+plt[, posn := posn - 30]
+
+ggplot(plt[posn >= -20 & posn <= 60], aes(x = posn, y = pfrac, color = grp)) +
+    geom_line(size = 1) +
+    labs(x = 'Position relative to the start codon', y = 'Fraction of paired sequences', color = NULL) +
+    scale_color_discrete_c4a_cat(palette = 'brewer.set2') +
+    scale_x_continuous(breaks = seq(-15, 60, 15), minor_breaks = seq(-21, 60, 3)) +
+    theme(panel.grid.major.x = element_line(size = 0.8, linetype = 2),
+          panel.grid.minor.x = element_line(size = 0.4, linetype = 2),
+          legend.position = 'inside',
+          legend.position.inside = c(0.98, 0.02),
+          legend.justification = c(1, 0),
+          legend.background = element_blank())
+ggsave('figures/ncorf_cds_start_codon_secondary_structure_human.pdf', width = 4, height = 3)
+
+plt <- start_ss_human[, pair_frac(structure), by = .(grp2)]
+plt[, posn := posn - 30]
+
+ggplot(plt[posn >= -20 & posn <= 60], aes(x = posn, y = pfrac, color = grp2)) +
+    geom_line(size = 1) +
+    labs(x = 'Position relative to the start codon', y = 'Fraction of paired sequences', color = NULL) +
+    scale_color_discrete_c4a_cat(palette = 'brewer.set2') +
+    scale_x_continuous(breaks = seq(-15, 60, 15), minor_breaks = seq(-21, 60, 3)) +
+    theme(panel.grid.major.x = element_line(size = 0.8, linetype = 2),
+          panel.grid.minor.x = element_line(size = 0.4, linetype = 2),
+          legend.position = 'inside',
+          legend.position.inside = c(0.98, 0.02),
+          legend.justification = c(1, 0),
+          legend.background = element_blank())
+
+# classify by ORF type: similar results
+plt <- start_ss_human[, pair_frac(structure), by = .(orf_type)]
+plt[, posn := posn - 30]
+
+ggplot(plt, aes(x = posn, y = pfrac, color = orf_type)) +
+    geom_line() +
+    scale_color_discrete_c4a_cat('Dark2')
+
+
+start_ss_mouse <- fread('data/ncorf_v2412/mouse_start_flanking_150nt.fold.tsv')
+start_ss_mouse <- ncorf_mouse[, .(uid, orf_type, grp = 'ncORF')][start_ss_mouse, on = .(uid = header)]
+start_ss_mouse[str_starts(uid, 'ENS'), `:=`(orf_type = 'CDS', grp = 'CDS')]
+
+plt <- start_ss_mouse[, pair_frac(structure), by = .(grp)]
+plt[, posn := posn - 30]
+
+ggplot(plt[posn >= -20 & posn <= 60], aes(x = posn, y = pfrac, color = grp)) +
+    geom_line(size = 1) +
+    labs(x = 'Position relative to the start codon', y = 'Fraction of paired sequences', color = NULL) +
+    scale_color_discrete_c4a_cat(palette = 'brewer.set2') +
+    scale_x_continuous(breaks = seq(-15, 60, 15), minor_breaks = seq(-21, 60, 3)) +
+    theme(panel.grid.major.x = element_line(size = 0.8, linetype = 2),
+          panel.grid.minor.x = element_line(size = 0.4, linetype = 2),
+          legend.position = 'inside',
+          legend.position.inside = c(0.98, 0.02),
+          legend.justification = c(1, 0),
+          legend.background = element_blank())
+ggsave('figures/ncorf_cds_start_codon_secondary_structure_mouse.pdf', width = 4, height = 3)
+```
+
+#### codon usage bias
+```{r}
+calc_cub <- function(path_seq_cds, path_seq_orf, path_txrep, path_trna){
+    txrep <- fread(path_txrep)
+    trna <- Biostrings::readRNAStringSet(path_trna)
+    trna_gcn <- table(data.table::tstrsplit(sub(' .*', '', names(trna)), '-')[[3]])
+    trna_gcn <- trna_gcn[names(trna_gcn) != 'NNN']
+    trna_w <- cubar::est_trna_weight(trna_gcn)
+    
+    seq_cds <- Biostrings::readDNAStringSet(path_seq_cds)
+    names(seq_cds) <- str_remove(names(seq_cds), '\\..*')
+    seq_cds <- seq_cds[txrep$tx_name]
+    seq_cds <- seq_cds[(Biostrings::width(seq_cds) %% 3) == 0]
+    seq_cds <- Biostrings::subseq(seq_cds, start = 4, end = Biostrings::width(seq_cds) - 3)
+    
+    seq_orf <- Biostrings::readDNAStringSet(path_seq_orf)
+    seq_orf <- Biostrings::subseq(seq_orf, start = 4, end = Biostrings::width(seq_orf) - 3)
+    
+    enc_cds <- cubar::get_enc(cubar::count_codons(seq_cds))
+    enc_orf <- cubar::get_enc(cubar::count_codons(seq_orf))
+    tai_cds <- cubar::get_tai(cubar::count_codons(seq_cds), trna_w)
+    tai_orf <- cubar::get_tai(cubar::count_codons(seq_orf), trna_w)
+    
+    res <- data.table(
+        id = c(names(seq_cds), names(seq_orf)),
+        type = rep(c('CDS', 'ncORF'), times = c(length(seq_cds), length(seq_orf))),
+        len = 1 + c(Biostrings::width(seq_cds), Biostrings::width(seq_orf))/3,
+        enc = c(enc_cds, enc_orf),
+        tai = c(tai_cds, tai_orf))
+}
+
+cub_human <- calc_cub(
+    path_seq_cds = 'data/Homo_sapiens.GRCh38.cds.all.fa.gz',
+    path_seq_orf = 'data/ncorf_v2412/human_three_methods_ncorf.final.nuc.fa',
+    path_trna = 'data/hg38-mature-tRNAs.fa',
+    path_txrep = 'data/Homo_sapiens.GRCh38.107.txinfo.rep.pcg.tsv')
+
+cub_mouse <- calc_cub(
+    path_seq_cds = 'data/Mus_musculus.GRCm39.cds.all.fa.gz',
+    path_seq_orf = 'data/ncorf_v2412/mouse_three_methods_ncorf.final.nuc.fa',
+    path_trna = 'data/mm39-mature-tRNAs.fa',
+    path_txrep = 'data/Mus_musculus.GRCm39.107.txinfo.rep.pcg.tsv')
+
+cub_all <- rbind(Human = cub_human, Mouse = cub_mouse, idcol = 'species')
+
+cub_all[species == 'Human', wilcox.test(tai[type == 'CDS'], tai[type == 'ncORF'])$p.value]
+cub_all[species == 'Mouse', wilcox.test(tai[type == 'CDS'], tai[type == 'ncORF'])$p.value]
+
+plt_annot <- data.table(
+    type = 1.5,
+    tai = Inf,
+    label = c('italic(P)==1.3%*%10^-255', 'italic(P)==3.2%*%10^-246'),
+    species = c('Human', 'Mouse')
+)
+# TODO: plot individually
+p1 <- ggplot(cub_all[species == 'Human'], aes(x = type, y = tai)) +
+    geom_violin(aes(fill = type), show.legend = FALSE) +
+    scale_y_continuous(limits = c(0.1, 0.5)) +
+    geom_boxplot(aes(fill = type), outliers = FALSE, show.legend = FALSE, width = 0.1) +
+    labs(x = NULL, y = 'tRNA adaption index') +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_fill_discrete_c4a_cat(palette = 'brewer.set2') +
+    annotate('text', x = 1.5, y = Inf, label = 'italic(P)==1.3%*%10^-255', parse = TRUE, vjust = 1)
+
+p2 <- ggplot(cub_all[species == 'Mouse'], aes(x = type, y = tai)) +
+    geom_violin(aes(fill = type), show.legend = FALSE) +
+    scale_y_continuous(limits = c(0.05, 0.25)) +
+    geom_boxplot(aes(fill = type), outliers = FALSE, show.legend = FALSE, width = 0.1) +
+    labs(x = NULL, y = 'tRNA adaption index') +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_fill_discrete_c4a_cat(palette = 'brewer.set2') +
+    annotate('text', x = 1.5, y = Inf, label = 'italic(P)==3.2%*%10^-246', parse = TRUE, vjust = 1)
+p1 + p2
+ggsave('figures/ncorf_cds_tai.pdf', width = 4, height = 3)
+
+
+cub_all[species == 'Human', wilcox.test(enc[type == 'CDS'], enc[type == 'ncORF'])$p.value]  # 0
+cub_all[species == 'Mouse', wilcox.test(enc[type == 'CDS'], enc[type == 'ncORF'])$p.value]  # 0
+
+p1 <- ggplot(cub_all[species == 'Human'], aes(x = type, y = enc)) +
+    geom_violin(aes(fill = type), show.legend = FALSE) +
+    geom_boxplot(aes(fill = type), outliers = FALSE, show.legend = FALSE, width = 0.1) +
+    facet_wrap(vars(species), scales = 'free') +
+    labs(x = NULL, y = 'Effective number of codons') +
+    scale_fill_discrete_c4a_cat(palette = 'brewer.set2') +
+    annotate('text', x = 1.5, y = Inf, label = 'italic(P)<10^-307', parse = TRUE, vjust = 1)
+
+p2 <- ggplot(cub_all[species == 'Mouse'], aes(x = type, y = enc)) +
+    geom_violin(aes(fill = type), show.legend = FALSE) +
+    geom_boxplot(aes(fill = type), outliers = FALSE, show.legend = FALSE, width = 0.1) +
+    facet_wrap(vars(species), scales = 'free') +
+    labs(x = NULL, y = 'Effective number of codons') +
+    scale_fill_discrete_c4a_cat(palette = 'brewer.set2') +
+    annotate('text', x = 1.5, y = Inf, label = 'italic(P)<10^-307', parse = TRUE, vjust = 1)
+p1 + p2
+ggsave('figures/ncorf_cds_enc.pdf', width = 4, height = 3)
+```
+
+## human and mouse number of libraries
+```{r}
+library(data.table)
+library(ggplot2)
+library(cols4all)
+library(patchwork)
+
+theme_set(theme_classic(base_size = 12) + theme(
+    axis.text = element_text(color = 'black'),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 12),
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)))
+
+orflevels <- c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF')
+tofct_orflevels <- function(x, reverse = FALSE){
+    x[x == 'lncRNA-ORF'] <- 'lncORF'
+    if(reverse){
+        factor(x, levels = rev(orflevels))
+    }else{
+        factor(x, levels = orflevels)
+    }
+}
+
+human_lib <- read_tsv("data/library/human_data_refilter_174.tsv")
+p1 <- ggplot(human_lib, aes(x = fct_rev(fct_infreq(re_tissue)))) +
+  geom_histogram(stat = "count", fill = "#d15034") +
+  theme_classic() +
+  theme(axis.text.x = element_text(color = "black"),
+        axis.text.y = element_text(color = "black")) +
+  xlab("Tissue") +
+  ylab("Library counts") +
+  guides(fill = "none") +
+  coord_flip() +
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_blank(),
+        axis.text = element_text(color = "black"),
+        strip.text = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  scale_y_continuous(position = "right") +
+  xlab(NULL) 
+
+mouse_lib <- read_tsv("data/library/mouse_data_refilter_209.tsv")
+p2 <- ggplot(mouse_lib, aes(x = fct_rev(fct_infreq(re_tissue)))) +
+  geom_histogram(stat = "count",fill = "#264a5f") +
+  theme_classic() +
+  theme(strip.background = element_blank(), 
+        strip.text.x = element_blank(),
+        axis.text = element_text(color = "black"),
+        strip.text = element_text(size = 12),
+        plot.title = element_text(hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5)) +
+  xlab("Tissue") +
+  ylab("Library counts") +
+  guides(fill = "none") +
+  coord_flip() +
+  theme(strip.background = element_blank(), strip.text.x = element_blank()) +
+  scale_y_continuous(position = "right") +
+  xlab(NULL)
+p1+p2 + plot_annotation(tag_levels = "A")
+ggsave("figures/ncorfs/human_and_mouse_library_counts_refilter.pdf", width = 9, height = 5)
+```
+
+
+## Overview of final ORFs
+```{r}
+ncorf_human <- fread('data/ncorf_v2412/human_three_methods_ncorf.final.tsv')
+ncorf_mouse <- fread('data/ncorf_v2412/mouse_three_methods_ncorf.final.tsv')
+
+tmp1 <- ncorf_human[, .(.N), by = .(orf_type)]
+tmp2 <- ncorf_mouse[, .(.N), by = .(orf_type)]
+plt <- rbind(Human = tmp1, Mouse = tmp2, idcol = 'species')
+plt[, orf_type := factor(orf_type, levels=c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF'))]
+
+# number of ORF types
+ggplot(plt, aes(x = orf_type, y = N, fill = orf_type)) +
+    geom_col(show.legend = FALSE, width = 0.75) +
+    geom_text(aes(label = N), vjust = -0.2) +
+    scale_fill_discrete_c4a_cat(palette = 'carto.safe') +
+    facet_wrap(vars(species), scales = 'free') +
+    labs(x = NULL, y = 'Number of ORFs') +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1))
+ggsave('figures/ncorf_overview_type_count.pdf', width = 6, height = 3)
+
+# length distribution
+plt <- rbind(Human = ncorf_human, Mouse = ncorf_mouse, idcol = 'species')
+plt[, orf_type := factor(orf_type, levels=c('lncORF', 'uORF', 'uoORF', 'iORF', 'doORF', 'dORF'))]
+
+ggplot(plt, aes(x = orf_len/3 - 1, color = orf_type)) +
+    stat_ecdf() +
+    facet_wrap(vars(species), scales = 'free') +
+    scale_color_discrete_c4a_cat(palette = 'carto.safe') +
+    scale_x_log10() +
+    labs(x = 'ORF length (amino acids)', y = 'Cumulative fractions', color = NULL)
+ggsave('figures/ncorf_length_by_type_ecdf.pdf', width = 7, height = 3)
+
+
+plt[, {
+    p <- sapply(orflevels, function(ot1){
+        sapply(orflevels, function(ot2){
+            wilcox.test(orf_len[orf_type == ot1], orf_len[orf_type == ot2])$p.value
+        })
+    })
+    p <- as.data.table(p)
+    setnames(p, orflevels)
+    p[, orf_type := orflevels]
+    p[]
+}, by = .(species)]
+
+
+# start codon usage
+ggplot(plt, aes(y = orf_type, fill = start_codon)) +
+    geom_bar(position = 'fill') +
+    facet_wrap(vars(species)) +
+    scale_fill_discrete_c4a_cat('carto.safe') +
+    labs(y = NULL, x = 'Fraction', fill = NULL)
+ggsave('figures/ncorf_start_codon_usage.pdf', width = 6, height = 3)
+
+# relative position in the coding sequence
+ggplot(plt, aes(x = tstart/tx_len)) +
+    geom_histogram(binwidth = 0.04) +
+    facet_grid(rows = vars(orf_type), cols = vars(species), scales = 'free')
+
+ggplot(plt, aes(x = tstart/tx_len, y = after_stat(density), color = orf_type)) +
+    geom_freqpoly(binwidth = 0.04) +
+    scale_color_discrete_c4a_cat('carto.safe') +
+    facet_wrap(vars(species), scales = 'free_y') +
+    labs(x = 'ncORF start position / transcript length', y = 'Density', color = NULL)
+ggsave('figures/ncorf_start_relative_position.pdf', width = 7, height = 3)
+```
+
+
+## Overlap with Ribo-Seq ORFs
+```{r}
+library(data.table)
+library(ggplot2)
+library(readxl)
+library(writexl)
+library(stringr)
+
+num_percent <- function(x, p){
+    str_c(scales::number(x, big.mark = ','), '\n(', scales::percent(p, accuracy = 0.1), ')')
+}
+```
+
+```{r}
+ncorf_human <- fread('data/ncorf_v2412/human_three_methods_ncorf.final.tsv')
+ncorf_mouse <- fread('data/ncorf_v2412/mouse_three_methods_ncorf.final.tsv')
+
+ncorf_gencode <- fread('../ncorf_catalog/data/Mudge2022/orfs_mapped_representative.tsv')
+ncorf_gencode[, uid_start := str_c(chrom, gstart, strand, sep = '_')]
+ncorf_gencode[, uid_end := str_c(chrom, gend, strand, sep = '_')]
+
+ncorf_human[ncorf_gencode, `:=`(gencode_s = i.orf_id, tier_s = i.tier), on = .(uid_start)]
+ncorf_human[ncorf_gencode, `:=`(gencode_e = i.orf_id, tier_e = i.tier), on = .(uid_end)]
+
+ncorf_human[, `:=`(gencode = gencode_s, tier = tier_s)]
+ncorf_human[is.na(gencode_s), `:=`(gencode = gencode_e, tier = tier_e)]
+ncorf_human[!is.na(gencode_s) & !is.na(gencode_e), `:=`(
+    gencode = ifelse(tier_s < tier_e, gencode_s, gencode_e),
+    tier = ifelse(tier_s < tier_e, tier_s, tier_e))]
+ncorf_human[, c('gencode_s', 'gencode_e', 'tier_s', 'tier_e') := NULL]
+ncorf_human[ncorf_gencode, group := i.group, on = .(gencode = orf_id)]
+
+ncorf_human[, table(tier, useNA = 'ifany')]
+# Tier 1A Tier 1B Tier 2A Tier 2B  Tier 3  Tier 4    <NA> 
+#       5     441      13     648      31    2356    8129
+
+ncorf_human[, table(str_remove(tier, '(A|B)$'), useNA = 'ifany')]
+# Tier 1 Tier 2 Tier 3 Tier 4   <NA> 
+#    446    661     31   2356   8129
+
+ncorf_human[, table(group, useNA = 'ifany')]
+# phase1 single   <NA> 
+#   2266   1228   8129
+
+ncorf_gencode[, found := orf_id %in% ncorf_human$gencode]
+ncorf_gencode[, table(tier, found)]
+#           found
+# tier      FALSE TRUE
+#   Tier 1A     0    5
+#   Tier 1B   136  441
+#   Tier 2A     7   13
+#   Tier 2B   363  648
+#   Tier 3     47   31
+#   Tier 4   2900 2356
+
+ncorf_gencode[, tier_short := str_remove(tier, '(A|B)$')]
+ncorf_gencode[, table(tier_short, found)]
+#  tier_short FALSE TRUE
+#     Tier 1   136  446
+#     Tier 2   370  661
+#     Tier 3    47   31
+#     Tier 4  2900 2356
+
+plt <- as.data.table(ncorf_gencode[, table(tier_short, found)])
+plt[, prop := N/sum(N), by = .(tier_short)]
+
+ggplot(plt, aes(x = tier_short, y = N, fill = found)) +
+    geom_col(position = 'fill', width = 0.85) +
+    geom_text(aes(label = num_percent(N, prop)),
+              position = position_fill(vjust = .5)) +
+    scale_fill_manual(values = c('#A6CEE3', '#B2DF8A'),
+                      breaks = c(F, T), labels = c('Not found', 'Found')) +
+    scale_y_continuous(labels = scales::percent,
+                       expand = expand_scale(mult = c(0, 0.05))) +
+    labs(x = NULL, y = 'Proportion of ORFs', fill = NULL) +
+    theme_classic(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          legend.position = 'top')
+ggsave('figures/overlap_with_GENCODE_ORFs_tier.pdf', width = 4, height = 3)
+
+ncorf_gencode[, table(group, found)]
+#          found
+# group    FALSE TRUE
+#   phase1   731 2266
+#   single  2722 1228
+
+plt <- as.data.table(ncorf_gencode[, table(group, found)])
+plt[, prop := N/sum(N), by = .(group)]
+
+ggplot(plt, aes(x = group, y = N, fill = found)) +
+    geom_col(position = 'fill', width = 0.85) +
+    geom_text(aes(label = num_percent(N, prop)),
+              position = position_fill(vjust = .5)) +
+    scale_fill_manual(values = c('#A6CEE3', '#B2DF8A'),
+                      breaks = c(F, T), labels = c('Not found', 'Found')) +
+    scale_y_continuous(labels = scales::percent,
+                       expand = expand_scale(mult = c(0, 0.05))) +
+    labs(x = NULL, y = 'Proportion of ORFs', fill = NULL) +
+    theme_classic(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          legend.position = 'top')
+ggsave('figures/overlap_with_GENCODE_ORFs_group.pdf', width = 3, height = 3)
+```
+
+
+## Overlap with MS-ORFs we compiled
+```{r}
+ms_ncorf <- fread('../ncorf_benchmark/results/human_mouse_orfs_with_ms_evidence_LTY_clean.tsv')
+ms_ncorf[, uid_start := str_c(chrom, gstart, strand, sep = '_')]
+ms_ncorf[, uid_end := str_c(chrom, gend, strand, sep = '_')]
+
+# tag ncORFs with MS evidence
+ncorf_human[ms_ncorf, wms := i.uuid, on = .(uid_start)]
+ncorf_human[ms_ncorf, wms := i.uuid, on = .(uid_end)]
+
+ncorf_mouse[ms_ncorf, wms := i.uuid, on = .(uid_start)]
+ncorf_mouse[ms_ncorf, wms := i.uuid, on = .(uid_end)]
+
+ms_ncorf[, found := uuid %in% c(ncorf_human$wms, ncorf_mouse$wms)]
+
+table(ms_ncorf$species)
+# human mouse 
+#  3494   873 
+
+ms_ncorf[, table(species, found)]
+#         found
+# species FALSE TRUE
+#   human  1940 1554
+#   mouse   283  590
+
+plt <- as.data.table(ms_ncorf[, table(species, found)])
+plt[, species := str_to_title(species)]
+plt[, prop := N/sum(N), by = .(species)]
+
+ggplot(plt, aes(x = species, y = N, fill = found)) +
+    geom_col(position = 'fill', width = 0.85) +
+    geom_text(aes(label = num_percent(N, prop)),
+              position = position_fill(vjust = .5)) +
+    scale_fill_manual(values = c('#A6CEE3', '#B2DF8A'),
+                      breaks = c(F, T), labels = c('Not found', 'Found')) +
+    scale_y_continuous(labels = scales::percent,
+                       expand = expand_scale(mult = c(0, 0.05))) +
+    labs(x = NULL, y = 'Proportion of ORFs', fill = NULL) +
+    theme_classic(base_size = 12) +
+    theme(axis.text = element_text(color = 'black'),
+          legend.position = 'top')
+ggsave('figures/overlap_with_JGG_MS_ncORFs.pdf', width = 3, height = 3)
+
+ncorf_human[, table(is.na(wms))]
+# FALSE  TRUE 
+#  1554 10069
+
+ncorf_mouse[, table(is.na(wms))]
+#  FALSE  TRUE 
+#    590 15895
+
+ncorf_human[, table(!is.na(wms) | readr::parse_number(tier) %in% c(1, 2, 3))]
+# FALSE  TRUE 
+#  9535  2088
+
+ncorf_human[, table(wms = !is.na(wms), tier123 = readr::parse_number(tier) %in% c(1, 2, 3))]
+#          tier123
+# wms      FALSE TRUE
+#    FALSE  9535  534
+#    TRUE    950  604
+
+ncorf_human[is.na(wms) & is.na(gencode)]  # 7580 / 11623 = 0.6521552
+```
+
+## A combined dataset for downstream analysis
+```{r}
+# MS evidence
+ncorf_human[, ms := readr::parse_number(tier) %in% c(1, 2, 3) | !is.na(wms)]
+ncorf_mouse[, ms := !is.na(wms)]
+
+ncorf_human_cdsovlp <- fread('data/ncorf_annot/human_three_methods_ncorf.cds_overlap.tsv')
+ncorf_human_cdsovlp <- ncorf_human_cdsovlp[V13 > 0]
+ncorf_human[, cds_ovlp := uid %in% ncorf_human_cdsovlp$V4]
+
+ncorf_human[, table(cds_ovlp)]
+# "cds_ovlp
+# FALSE  TRUE 
+#  8727  2896
+
+ncorf_mouse_cdsovlp <- fread('data/ncorf_annot/mouse_three_methods_ncorf.cds_overlap.tsv')
+ncorf_mouse_cdsovlp <- ncorf_mouse_cdsovlp[V13 > 0]
+ncorf_mouse[, cds_ovlp := uid %in% ncorf_mouse_cdsovlp$V4]
+
+ncorf_mouse[, table(cds_ovlp)]
+#  cds_ovlp
+# FALSE  TRUE 
+# 12120  4365
+
+# Phylogenetic signals
+ncorf_cons <- fread('results/ncorfs_bls_phylocsf.tsv')
+ncorf_cons <- ncorf_cons[method == 'ASR']
+
+ncorf_human <- ncorf_human[ncorf_cons[, !"species"], on = .(uid), nomatch = 0]
+ncorf_mouse <- ncorf_mouse[ncorf_cons[, !"species"], on = .(uid), nomatch = 0]
+
+## export
+fwrite(ncorf_human, 'data/ncorf_v2412/human_three_methods_ncorf.final.meta.tsv', sep = '\t')
+fwrite(ncorf_mouse, 'data/ncorf_v2412/mouse_three_methods_ncorf.final.meta.tsv', sep = '\t')
+
+# export supplementary table
+tmp <- rbind(Human = ncorf_human, Mouse = ncorf_mouse, idcol = 'species', fill = TRUE)
+tmp[, c('gstart', 'gend') := tstrsplit(uid, '_', fixed=TRUE, type.convert=TRUE)[2:3]]
+tmp <- tmp[, .(species, orf_id = uid, orf_type, orf_len, start_codon, chromosome = chrom,
+               strand, genomic_start = gstart, genomic_end = gend, gene_id, gene_biotype,
+               representative_transcript = tx_name, transcript_start = tstart, transcript_end = tend,
+               gencode_id = gencode, gencode_group = group, gencode_tier = tier)]
+writexl::write_xlsx(tmp, 'results/Table_ncORF_annotation.xlsx')
+```
